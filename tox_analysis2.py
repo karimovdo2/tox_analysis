@@ -1,19 +1,19 @@
-
-
+import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import re
+import math
+from io import BytesIO
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.metrics import mean_squared_error
 from scipy.optimize import curve_fit
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+###############################################################################
+# ФУНКЦИИ ДЛЯ АНАЛИЗА (адаптированные из вашего Tkinter-кода)
+###############################################################################
 
-#############################
-# 1) Функции подготовки данных
-#############################
 def transliterate_column_name(s: str) -> str:
     mapping = {
         'А':'A','а':'a','Б':'B','б':'b','В':'V','в':'v','Г':'G','г':'g','Д':'D','д':'d','Е':'E','е':'e',
@@ -42,9 +42,7 @@ def replace_outliers_in_PC1(df, group_col, col, threshold=2.0, groups_to_clean=N
     return df_new
 
 def format_sci_custom(num, precision=1):
-    """
-    Форматируем число в виде 1,0×10⁻³ и т.д.
-    """
+    """Форматируем число в виде 1,0×10⁻³ и т.д."""
     s = f"{num:.{precision}e}"
     s = s.replace('.', ',')
     base, exp = s.split('e')
@@ -59,14 +57,9 @@ def format_sci_custom(num, precision=1):
     else:
         return f"{base}×10{exp_str}"
 
-#############################
-# 2) Модели PC1(d) и BMD
-#############################
-import math
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-from sklearn.metrics import mean_squared_error
-
+###############################################################################
+# МОДЕЛИ
+###############################################################################
 def model_linear(d, a, b):
     return a + b*d
 
@@ -89,7 +82,6 @@ def compute_aic(n, rss, k):
 
 def fit_and_evaluate(model_func, dose, pc1, p0):
     try:
-        from scipy.optimize import curve_fit
         popt, _ = curve_fit(model_func, dose, pc1, p0=p0, maxfev=100000)
         pred = model_func(dose, *popt)
         mse = mean_squared_error(pc1, pred)
@@ -113,35 +105,37 @@ def find_dose_for_target(target_val, model_func, params,
             best_d = x
     return best_d
 
-#############################
-# 3) Скорректированная логистическая модель риска
-#############################
 def risk_logistic_adj(d, A, B):
-    """
-    Скорректированная логистическая модель: r(0)=0, r(∞)=1
-    """
+    """Скорректированная логистическая модель: r(0)=0, r(∞)=1"""
     f0 = 1.0 / (1.0 + np.exp(B*A))
     f_d = 1.0 / (1.0 + np.exp(-B*(d - A)))
     return (f_d - f0)/(1 - f0)
 
 def find_dose_for_risk_adj(r, A, B):
-    if r<0 or r>=1:
+    if r < 0 or r >= 1:
         return np.nan
     f0 = 1.0 / (1.0 + np.exp(B*A))
-    f_target = r*(1 - f0)+f0
-    if f_target<=0 or f_target>=1:
+    f_target = r*(1 - f0) + f0
+    if f_target <= 0 or f_target >= 1:
         return np.nan
     d_est = A - (1.0/B)*np.log((1.0/f_target)-1)
     return d_est
 
-#############################
-# 4) Основная функция анализа
-#############################
-def run_analysis(file_path, remove_outliers, outlier_threshold,
-                 groups_text, risk_input):
-    import pandas as pd
+###############################################################################
+# ОСНОВНАЯ ФУНКЦИЯ
+###############################################################################
+def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_input):
+    """Принимает:
+       - file (UploadedFile объект или путь),
+       - remove_outliers (bool),
+       - outlier_threshold (float),
+       - groups_text (строка вида '50,100'),
+       - risk_input (float) — уровень риска.
+       Возвращает словарь с графиками и текстовыми результатами.
+    """
+    # Читаем Excel из UploadedFile напрямую:
+    df = pd.read_excel(file)
 
-    df = pd.read_excel(file_path)
     # Транслитерация
     old_cols = df.columns.tolist()
     new_cols = [transliterate_column_name(col) for col in old_cols]
@@ -150,16 +144,15 @@ def run_analysis(file_path, remove_outliers, outlier_threshold,
     # Ищем столбец с дозой
     dose_col = None
     for c in df.columns:
-        if c.lower() in ["doza","dose","доза","доза_"] or c.upper()=="DOZA":
+        if c.lower() in ["doza","dose","доза","доза_"] or c.upper() == "DOZA":
             dose_col = c
             break
     if dose_col is None:
-        messagebox.showerror("Ошибка", "Столбец с дозой не найден.")
-        return None
+        return None, "Столбец с дозой не найден."
 
     df.rename(columns={dose_col:"Dose"}, inplace=True)
     all_cols = df.columns.tolist()
-    predictors = [col for col in all_cols if col!="Dose"]
+    predictors = [col for col in all_cols if col != "Dose"]
 
     # Заполняем пропуски
     for col in predictors:
@@ -169,13 +162,13 @@ def run_analysis(file_path, remove_outliers, outlier_threshold,
     grouped = df.groupby("Dose")
     cols_to_drop = []
     for col in predictors:
-        if any(grouped[col].count()==0):
+        if any(grouped[col].count() == 0):
             cols_to_drop.append(col)
     cols_to_drop = list(set(cols_to_drop))
     df.drop(columns=cols_to_drop, inplace=True)
     final_predictors = [col for col in predictors if col not in cols_to_drop]
 
-    # PCA
+    # PCA -> PC1
     X = df[final_predictors].values
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
@@ -185,19 +178,18 @@ def run_analysis(file_path, remove_outliers, outlier_threshold,
 
     # Удаляем выбросы
     if remove_outliers:
-        if groups_text.strip()=="":
+        if groups_text.strip() == "":
             groups_to_clean = None
         else:
             try:
                 groups_to_clean = [float(x.strip()) for x in groups_text.split(",")]
             except:
-                messagebox.showerror("Ошибка","Неверный формат групп доз.")
-                return None
+                return None, "Неверный формат групп доз (пример: 50,100)."
         df = replace_outliers_in_PC1(df, group_col="Dose", col="PC1",
                                      threshold=outlier_threshold,
                                      groups_to_clean=groups_to_clean)
 
-    # PC1 ~ Dose, ищем лучшую модель
+    # Ищем лучшую модель
     dose_vals = df["Dose"].values
     pc1_vals = df["PC1"].values
     model_candidates = [
@@ -216,9 +208,8 @@ def run_analysis(file_path, remove_outliers, outlier_threshold,
     best_func = [x for x in model_candidates if x[0]==best_name][0][1]
     best_params = best_res["params"]
 
-    # Строим график PC1~Dose
-    fig_pc1 = plt.Figure()
-    ax1 = fig_pc1.add_subplot(111)
+    # График PC1
+    fig_pc1, ax1 = plt.subplots()
     ax1.scatter(dose_vals, pc1_vals, alpha=0.6, label="Data PC1")
     dose_grid = np.linspace(dose_vals.min(), dose_vals.max(),200)
     pc1_pred = best_func(dose_grid, *best_params)
@@ -228,25 +219,31 @@ def run_analysis(file_path, remove_outliers, outlier_threshold,
     ax1.set_title("PC1 ~ Dose")
     ax1.legend()
 
-    # BMD
+    # BMD (5% прирост от PC1(0))
     pc1_0 = best_func(0, *best_params)
-    target_pc1 = pc1_0*1.05
+    target_pc1 = pc1_0 * 1.05
     bmd_5pct = find_dose_for_target(target_pc1, best_func, best_params,
                                     d_min=0, d_max=1000, step=0.1)
 
     # Empirical Risk
     df_control = df[df["Dose"]==0]
-    mu_c = df_control["PC1"].mean()
-    sd_c = df_control["PC1"].std()
+    if len(df_control)==0:
+        # на случай, если нет группы Dose=0
+        mu_c = df["PC1"].mean()
+        sd_c = df["PC1"].std()
+    else:
+        mu_c = df_control["PC1"].mean()
+        sd_c = df_control["PC1"].std()
     low_bound = mu_c - 2*sd_c
     up_bound = mu_c + 2*sd_c
     df["PC1_out"] = ~df["PC1"].between(low_bound, up_bound)
     risk_df = df.groupby("Dose")["PC1_out"].mean()
-    if 0 in risk_df.index:
-        risk_df.loc[0]=0.0
 
-    fig_emp = plt.Figure()
-    ax2 = fig_emp.add_subplot(111)
+    # Если есть 0 в индексах, считаем, что риск = 0
+    if 0 in risk_df.index:
+        risk_df.loc[0] = 0.0
+
+    fig_emp, ax2 = plt.subplots()
     ax2.plot(risk_df.index, risk_df.values*100, 'ro-')
     ax2.set_xlabel("Dose")
     ax2.set_ylabel("Risk (%)")
@@ -255,12 +252,10 @@ def run_analysis(file_path, remove_outliers, outlier_threshold,
     # Adjusted Logistic Risk
     doses_risk = np.array(sorted(risk_df.index))
     risk_vals_emp = np.array([risk_df.loc[d_] for d_ in doses_risk])
-    # Подгоняем логистику
     try:
         popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp,
                                 p0=[50,0.1], maxfev=100000)
-        fig_log = plt.Figure()
-        ax3 = fig_log.add_subplot(111)
+        fig_log, ax3 = plt.subplots()
         d_grid_log = np.linspace(doses_risk.min(), doses_risk.max()*1.2, 150)
         risk_log_pred = risk_logistic_adj(d_grid_log, *popt_log)
         ax3.scatter(doses_risk, risk_vals_emp, c='r', label="Empirical Risk")
@@ -271,27 +266,20 @@ def run_analysis(file_path, remove_outliers, outlier_threshold,
         ax3.legend()
     except RuntimeError:
         popt_log = None
-        fig_log = plt.Figure()
-        ax_ = fig_log.add_subplot(111)
+        fig_log, ax_ = plt.subplots()
         ax_.text(0.1,0.5,"Logistic model fitting failed.", fontsize=12)
         ax_.set_title("Adjusted Logistic Risk Model")
 
-    # Текст, который нужно вывести в первой вкладке
-    # 1) Формула регрессии (условно)
-    # 2) Строки "Risk=... => Dose=..." (включая введённый пользователем и 3 стандартных)
-    text_log = ""
-    text_log += "Скорректированная логистическая функция:\n" \
-                "r(d) = (f(d) - f(0)) / [1 - f(0)],\n" \
-                "где f(d) = 1/[1 + exp(-B(d - A))].\n\n"
-
-    # Считаем дозу для введённого пользователем риска
-    user_risk = risk_input  # float
-    user_risk_dose = None
+    # Тексты
+    text_log = (
+        "Скорректированная логистическая функция:\n"
+        "r(d) = (f(d) - f(0)) / [1 - f(0)], где f(d) = 1/[1 + exp(-B(d - A))].\n\n"
+    )
+    user_risk = risk_input
     if popt_log is not None:
         user_risk_dose = find_dose_for_risk_adj(user_risk, *popt_log)
         text_log += f"Введённый риск: {user_risk:.5f} => Dose={user_risk_dose:.5f}\n\n"
-
-        # Три стандартных
+        # Стандартные риски
         standard_risks = [1e-3, 1e-4, 1e-5]
         for rr in standard_risks:
             dd_ = find_dose_for_risk_adj(rr, *popt_log)
@@ -300,154 +288,85 @@ def run_analysis(file_path, remove_outliers, outlier_threshold,
     else:
         text_log += "Логистическая модель не подогнана.\n"
 
-    # Текст, который нужно вывести во второй вкладке
-    # (график PC1-Dose + подпись BMD)
-    text_pc1 = (f"BMD (5% inc PC1) = {bmd_5pct:.4f} mg/kg\n"
-                f"Best PC1 model: {best_name}, params={best_params}\n")
+    text_pc1 = (
+        f"BMD (5% inc PC1) = {bmd_5pct:.4f} mg/kg\n"
+        f"Best PC1 model: {best_name}, params={best_params}\n"
+    )
+    text_emp = "Эмпирический риск PC1-out (двухстандартное отклонение)."
 
-    # Третья вкладка - Empirical Risk
-    # (можно без текста)
-    text_emp = "Здесь график эмпирического риска."
-
-    return {
+    # Возвращаем результаты
+    results = {
         "fig_log": fig_log,
         "text_log": text_log,
         "fig_pc1": fig_pc1,
         "text_pc1": text_pc1,
         "fig_emp": fig_emp,
-        "text_emp": text_emp
+        "text_emp": text_emp,
+        "BMD": bmd_5pct
     }
+    return results, None
 
-#############################
-# 5) Оконное приложение
-#############################
-root = tk.Tk()
-root.title("Анализ токсичности")
+###############################################################################
+# STREAMLIT ПРИЛОЖЕНИЕ
+###############################################################################
+def main():
+    st.title("Анализ токсичности (Web-приложение)")
 
-# Notebook (размещаем внизу, но сначала создадим поля ввода)
-notebook = ttk.Notebook(root)
-notebook.grid(row=7, column=0, columnspan=3, sticky="nsew", padx=5, pady=5)
+    st.write("Загрузите Excel-файл, выберите параметры и нажмите 'Запустить анализ'.")
 
-# Поля ввода
-file_label = tk.Label(root, text="Выберите Excel-файл:")
-file_entry = tk.Entry(root, width=50)
-browse_button = tk.Button(root, text="Обзор")
+    # Поля ввода
+    uploaded_file = st.file_uploader("Выберите Excel-файл (.xlsx)", type=["xlsx"])
+    remove_outliers = st.checkbox("Удалять выбросы (PC1)?", value=True)
+    outlier_threshold = st.number_input("Порог выбросов (Z-score):", value=2.0)
+    groups_text = st.text_input("Группы доз (через запятую, например 50,100):", value="")
+    risk_str = st.text_input("Уровень риска (пример: 1e-4):", value="1e-4")
 
-remove_cb_var = tk.BooleanVar(value=True)
-remove_cb = tk.Checkbutton(root, text="Удалять выбросы (PC1)", variable=remove_cb_var)
+    # Кнопка
+    if st.button("Запустить анализ"):
+        if uploaded_file is None:
+            st.error("Ошибка: Excel-файл не выбран.")
+        else:
+            # Проверяем риск
+            try:
+                user_risk_val = float(risk_str)
+            except:
+                st.error("Неверное значение риска. Пример: 1e-4")
+                return
 
-threshold_label = tk.Label(root, text="Порог выбросов (Z-score):")
-threshold_entry = tk.Entry(root, width=10)
-threshold_entry.insert(0, "2.0")
+            with st.spinner("Идёт анализ..."):
+                # Вызываем run_analysis
+                result, err_msg = run_analysis(
+                    file=uploaded_file,
+                    remove_outliers=remove_outliers,
+                    outlier_threshold=outlier_threshold,
+                    groups_text=groups_text,
+                    risk_input=user_risk_val
+                )
 
-groups_label = tk.Label(root, text="Группы доз (50,100):")
-groups_entry = tk.Entry(root, width=30)
+            if err_msg:
+                st.error(f"Ошибка: {err_msg}")
+            else:
+                # Выводим результаты
+                st.subheader("Результаты")
 
-risk_label = tk.Label(root, text="Уровень риска (1e-4):")
-risk_entry = tk.Entry(root, width=10)
-risk_entry.insert(0, "1e-4")
+                # 1) Логистическая модель
+                st.write("### Adjusted Logistic Risk Model")
+                st.pyplot(result["fig_log"])
+                st.text(result["text_log"])
 
-run_button = tk.Button(root, text="Запустить анализ")
-exit_button = tk.Button(root, text="Выход", command=root.quit)
+                # 2) PC1 - Dose
+                st.write("### PC1 - Dose")
+                st.pyplot(result["fig_pc1"])
+                st.text(result["text_pc1"])
 
-# Раскладка
-file_label.grid(row=0, column=0, sticky="w", padx=5, pady=5)
-file_entry.grid(row=0, column=1, padx=5, pady=5)
-browse_button.grid(row=0, column=2, padx=5, pady=5)
+                # 3) Empirical Risk
+                st.write("### Empirical Risk")
+                st.pyplot(result["fig_emp"])
+                st.text(result["text_emp"])
 
-remove_cb.grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=5)
-threshold_label.grid(row=2, column=0, sticky="w", padx=5, pady=5)
-threshold_entry.grid(row=2, column=1, padx=5, pady=5)
-groups_label.grid(row=3, column=0, sticky="w", padx=5, pady=5)
-groups_entry.grid(row=3, column=1, padx=5, pady=5)
-risk_label.grid(row=4, column=0, sticky="w", padx=5, pady=5)
-risk_entry.grid(row=4, column=1, padx=5, pady=5)
+                bmd_val = result["BMD"]
+                st.success(f"BMD (5% inc PC1) = {bmd_val:.4f} mg/kg/day")
 
-run_button.grid(row=5, column=0, padx=5, pady=10)
-exit_button.grid(row=5, column=1, padx=5, pady=10)
 
-# Функция "Обзор"
-def browse_file_cmd():
-    path = filedialog.askopenfilename(filetypes=[("Excel files","*.xlsx")])
-    if path:
-        file_entry.delete(0, tk.END)
-        file_entry.insert(0, path)
-browse_button.configure(command=browse_file_cmd)
-
-# Очистка вкладок Notebook
-def clear_notebook():
-    for tab_id in notebook.tabs():
-        notebook.forget(tab_id)
-
-# Запуск анализа
-def run_analysis_cmd():
-    # Стираем старые вкладки
-    clear_notebook()
-
-    path = file_entry.get()
-    if not path:
-        messagebox.showerror("Ошибка", "Не выбран Excel-файл.")
-        return
-    try:
-        thresh = float(threshold_entry.get())
-    except:
-        messagebox.showerror("Ошибка", "Неверный порог выбросов.")
-        return
-    gr_text = groups_entry.get()
-    r_str = risk_entry.get().strip()
-    try:
-        r_val = float(r_str)
-    except:
-        messagebox.showerror("Ошибка", "Неверное значение риска.")
-        return
-    remove_flag = remove_cb_var.get()
-
-    # Запускаем run_analysis
-    result = run_analysis(path, remove_flag, thresh, gr_text, r_val)
-    if result is None:
-        return
-
-    # Первая вкладка: Adjusted Logistic
-    tab_log = ttk.Frame(notebook)
-    notebook.add(tab_log, text="Adjusted Logistic Risk Model")
-    # График
-    canvas_log = FigureCanvasTkAgg(result["fig_log"], master=tab_log)
-    canvas_log.draw()
-    canvas_log.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-    # Текст
-    text_log = tk.Text(tab_log, wrap=tk.WORD, height=10)
-    text_log.insert(tk.END, result["text_log"])
-    text_log.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=False)
-
-    # Вторая вкладка: PC1-Dose
-    tab_pc1 = ttk.Frame(notebook)
-    notebook.add(tab_pc1, text="PC1 - Dose")
-    canvas_pc1 = FigureCanvasTkAgg(result["fig_pc1"], master=tab_pc1)
-    canvas_pc1.draw()
-    canvas_pc1.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-    text_pc1 = tk.Text(tab_pc1, wrap=tk.WORD, height=5)
-    text_pc1.insert(tk.END, result["text_pc1"])
-    text_pc1.pack(side=tk.BOTTOM, fill=tk.X, expand=False)
-
-    # Третья вкладка: Empirical Risk
-    tab_emp = ttk.Frame(notebook)
-    notebook.add(tab_emp, text="Empirical Risk")
-    canvas_emp = FigureCanvasTkAgg(result["fig_emp"], master=tab_emp)
-    canvas_emp.draw()
-    canvas_emp.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-    text_emp = tk.Text(tab_emp, wrap=tk.WORD, height=2)
-    text_emp.insert(tk.END, result["text_emp"])
-    text_emp.pack(side=tk.BOTTOM, fill=tk.X, expand=False)
-
-    # Можно popup
-    msg = f"BMD(5% inc PC1)={result['BMD']:.4f}\n"
-    msg += result["text_log"][:200]  # например, кусок
-    messagebox.showinfo("Результаты", msg)
-
-run_button.configure(command=run_analysis_cmd)
-
-# Расширяем главный окно
-root.rowconfigure(7, weight=1)
-root.columnconfigure(0, weight=1)
-
-root.mainloop()
+if __name__ == "__main__":
+    main()
