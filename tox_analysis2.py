@@ -15,7 +15,6 @@ from scipy.optimize import curve_fit
 ###############################################################################
 
 def transliterate_column_name(s: str) -> str:
-    """Транслитерация названий столбцов + замена неалфавитных символов на '_'."""
     mapping = {
         'А':'A','а':'a','Б':'B','б':'b','В':'V','в':'v','Г':'G','г':'g','Д':'D','д':'d','Е':'E','е':'e',
         'Ж':'Zh','ж':'zh','З':'Z','з':'z','И':'I','и':'i','Й':'J','й':'j','К':'K','к':'k','Л':'L','л':'l',
@@ -29,7 +28,6 @@ def transliterate_column_name(s: str) -> str:
     return s
 
 def replace_outliers_in_PC1(df, group_col, col, threshold=2.0, groups_to_clean=None):
-    """Заменяем выбросы (по Z-метрике) в PC1 на медиану группы."""
     df_new = df.copy()
     for group, subdf in df_new.groupby(group_col):
         if groups_to_clean is not None and group not in groups_to_clean:
@@ -44,7 +42,6 @@ def replace_outliers_in_PC1(df, group_col, col, threshold=2.0, groups_to_clean=N
     return df_new
 
 def format_sci_custom(num, precision=1):
-    """Форматируем число в виде 1,0×10⁻³ и т.д."""
     s = f"{num:.{precision}e}"
     s = s.replace('.', ',')
     base, exp = s.split('e')
@@ -79,15 +76,13 @@ def model_power(d, a, b, c):
     return a + b*(d**c)
 
 def compute_aic(n, rss, k):
-    """Вычисляем AIC для оценки качества подгонки."""
     val = rss/n + 1e-15
     ll = n * np.log(val)
     return ll + 2*k
 
 def fit_and_evaluate(model_func, dose, pc1, p0):
-    """Подбираем параметры модели curve_fit и вычисляем AIC."""
     try:
-        popt, _ = curve_fit(model_func, dose, pc1, p0=p0, maxfev=100000)
+        popt, _ = curve_fit(model_func, dose, pc1, p0=p0, maxfev=20000)  # Уменьшили maxfev
         pred = model_func(dose, *popt)
         mse = mean_squared_error(pc1, pred)
         rss = np.sum((pc1 - pred)**2)
@@ -100,7 +95,6 @@ def fit_and_evaluate(model_func, dose, pc1, p0):
 
 def find_dose_for_target(target_val, model_func, params,
                          d_min=0, d_max=1000, step=0.1):
-    """Простой перебор, чтобы найти дозу, при которой модель даёт значение = target_val."""
     best_d = None
     min_diff = float('inf')
     for x in np.arange(d_min, d_max+step, step):
@@ -112,13 +106,11 @@ def find_dose_for_target(target_val, model_func, params,
     return best_d
 
 def risk_logistic_adj(d, A, B):
-    """Скорректированная логистическая модель: r(0)=0, r(∞)=1."""
     f0 = 1.0 / (1.0 + np.exp(B*A))
     f_d = 1.0 / (1.0 + np.exp(-B*(d - A)))
     return (f_d - f0)/(1 - f0)
 
 def find_dose_for_risk_adj(r, A, B):
-    """Обратная функция для risk_logistic_adj: по уровню риска r находим дозу."""
     if r < 0 or r >= 1:
         return np.nan
     f0 = 1.0 / (1.0 + np.exp(B*A))
@@ -132,24 +124,19 @@ def find_dose_for_risk_adj(r, A, B):
 # ОСНОВНАЯ ФУНКЦИЯ АНАЛИЗА
 ###############################################################################
 def run_analysis(
-        file,
-        remove_outliers,
-        outlier_threshold,
-        groups_text,
-        risk_input,
-        normalize_control,
-        normalize_experimental,
-        slope_threshold=5
+    file,
+    remove_outliers,
+    outlier_threshold,
+    groups_text,
+    risk_input,
+    normalize_control,
+    normalize_experimental,
+    slope_threshold=5
 ):
-    """
-    Выполняет весь анализ и возвращает:
-    - словарь "results" со всеми графиками и текстами,
-    - либо (None, err_msg), если произошла ошибка.
-    """
-    # 1) Чтение Excel
+    # 1) Читаем Excel
     df = pd.read_excel(file)
 
-    # 2) Преобразуем все столбцы в числа (нечисловые -> NaN)
+    # 2) Преобразуем все столбцы в числа
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -217,10 +204,13 @@ def run_analysis(
                     new_value = sample_valid.mean()
                     df.loc[idx_max, "PC1"] = new_value
 
-    # 9) Нормализация опытных групп (Dose>0)
+    # 9) Нормализация опытных групп
     if normalize_experimental:
-        # 9.1. Базовая корректировка: если среднее ниже предыдущего, заменяем минимальное
+        st.write("=== Начинаем нормализацию опытных групп ===")
         positive_doses = sorted(df.loc[df["Dose"] > 0, "Dose"].unique())
+
+        # 9.1. Базовая корректировка
+        st.write("Шаг 9.1: Базовая корректировка (среднее в группе не должно быть меньше предыдущей).")
         for i in range(1, len(positive_doses)):
             current_dose = positive_doses[i]
             prev_dose = positive_doses[i - 1]
@@ -228,21 +218,27 @@ def run_analysis(
             group_prev = df[df["Dose"] == prev_dose]
             mean_current = group_current["PC1"].mean()
             mean_prev = group_prev["PC1"].mean()
+            st.write(f"   Доза={current_dose}, среднее={mean_current:.4f}, предыдущая доза={prev_dose}, среднее={mean_prev:.4f}")
             while mean_current < mean_prev:
                 idx_min = group_current["PC1"].idxmin()
                 sample_prev = group_prev["PC1"].sample(frac=0.5, random_state=42)
                 if sample_prev.empty:
+                    st.write("      Не осталось значений для выборки; прерываем цикл.")
                     break
                 new_value = sample_prev.mean()
+                st.write(f"      Заменяем минимальное значение в группе {current_dose} на {new_value:.4f}")
                 df.loc[idx_min, "PC1"] = new_value
                 group_current = df[df["Dose"] == current_dose]
                 mean_current = group_current["PC1"].mean()
+                st.write(f"      Новое среднее в группе {current_dose}={mean_current:.4f}")
 
-        # 9.2. Дополнительная корректировка при слишком крутом наклоне (макс 3 итерации)
+        # 9.2. Дополнительная корректировка при крутом наклоне - максимум 3 итерации
         tries = 0
         while tries < 3:
             tries += 1
-            # Считаем логистику на текущих данных
+            st.write(f"--- Доп. корректировка №{tries}, проверяем наклон логистики. ---")
+
+            # Считаем «временную» логистику
             try:
                 df_control_temp = df[df["Dose"] == 0]
                 if len(df_control_temp) == 0:
@@ -258,55 +254,71 @@ def run_analysis(
                 risk_df_temp = df.groupby("Dose")["PC1_out_temp"].mean()
                 doses_risk_temp = np.array(sorted(risk_df_temp.index))
                 risk_vals_emp_temp = np.array([risk_df_temp.loc[d] for d in doses_risk_temp])
+
                 popt_log_temp, _ = curve_fit(
                     risk_logistic_adj, 
                     doses_risk_temp, 
                     risk_vals_emp_temp,
                     p0=[50, 0.1], 
-                    maxfev=100000
+                    maxfev=20000  # ограниченное число итераций
                 )
             except RuntimeError:
                 popt_log_temp = None
 
             if popt_log_temp is None:
-                # Не получилось подогнать логистику - выходим
+                st.write("Не удалось подогнать логистическую кривую (RuntimeError). Прерываем доп. корректировку.")
                 break
 
-            # Проверяем наклон B
-            if popt_log_temp[1] <= slope_threshold:
-                # Наклон уже не слишком большой
+            # popt_log_temp = [A_temp, B_temp]
+            A_temp, B_temp = popt_log_temp
+            st.write(f"Параметры временной логистики: A_temp={A_temp:.5f}, B_temp={B_temp:.5f}")
+            if B_temp <= slope_threshold:
+                st.write(f"Наклон B={B_temp:.5f} ниже порога {slope_threshold}, корректировка не требуется.")
                 break
             else:
-                # Находим группу с максимальным приростом
+                st.write(f"Наклон B={B_temp:.5f} все еще выше порога {slope_threshold} -> ищем резкий подъем.")
+                # Находим группу с max приростом (mean_curr - mean_prev)
                 sharp_group = None
                 sharp_diff = -np.inf
-                for i in range(1, len(positive_doses)):
-                    curr_dose = positive_doses[i]
-                    prev_dose = positive_doses[i-1]
+                for i_pd in range(1, len(positive_doses)):
+                    curr_dose = positive_doses[i_pd]
+                    prev_dose = positive_doses[i_pd - 1]
                     group_curr = df[df["Dose"] == curr_dose]
                     group_prev = df[df["Dose"] == prev_dose]
                     diff = group_curr["PC1"].mean() - group_prev["PC1"].mean()
                     if diff > sharp_diff:
                         sharp_diff = diff
                         sharp_group = curr_dose
-                # Корректируем значения в "резкой" группе, если есть и предыдущая, и следующая
+                st.write(f"Резкий подъем найден в группе {sharp_group} (прирост={sharp_diff:.4f}).")
+
+                # Проверяем, есть ли у этой группы предыдущая и следующая
                 if sharp_group is not None:
                     sharp_index = positive_doses.index(sharp_group)
                     if sharp_index > 0 and sharp_index < len(positive_doses) - 1:
                         group_prev = df[df["Dose"] == positive_doses[sharp_index - 1]]
                         group_next = df[df["Dose"] == positive_doses[sharp_index + 1]]
                         group_sharp = df[df["Dose"] == sharp_group]
+                        count_sharp = len(group_sharp)
+                        st.write(f"Группа {sharp_group}, кол-во значений={count_sharp}. Меняем каждое.")
                         for idx in group_sharp.index:
                             combined_values = pd.concat([group_prev["PC1"], group_next["PC1"]])
                             if len(combined_values) == 0:
+                                st.write("Нет значений для объединения; прерываем.")
                                 break
                             sample_combined = combined_values.sample(frac=0.5, random_state=42)
                             if not sample_combined.empty:
                                 new_value = sample_combined.mean()
+                                st.write(f"   Заменяем значение в {sharp_group}, idx={idx}, на {new_value:.4f}")
                                 df.loc[idx, "PC1"] = new_value
-                # продолжаем следующий цикл (tries + 1) до 3 итераций
+                    else:
+                        st.write("У этой группы нет предыдущей/следующей (или она крайняя). Прерываем корректировку.")
+                        break
 
-    # 10) Удаляем выбросы по PC1
+                # если sharp_group=None или что-то не сработало – мы всё равно идём на следующий tries
+                # если на следующем шаге B всё равно высокий – повторим
+        st.write("=== Завершили нормализацию опытных групп ===")
+
+    # 10) Удаляем выбросы
     if remove_outliers:
         if groups_text.strip() == "":
             groups_to_clean = None
@@ -354,8 +366,14 @@ def run_analysis(
     # 13) BMD (5% прирост от PC1(0))
     pc1_0 = best_func(0, *best_params)
     target_pc1 = pc1_0 * 1.05
-    bmd_5pct = find_dose_for_target(target_pc1, best_func, best_params,
-                                    d_min=0, d_max=1000, step=0.1)
+    bmd_5pct = find_dose_for_target(
+        target_pc1, 
+        best_func, 
+        best_params,
+        d_min=0, 
+        d_max=1000, 
+        step=0.1
+    )
 
     # 14) Эмпирический риск (двухстандартное отклонение от контроля)
     df_control = df[df["Dose"] == 0]
@@ -382,8 +400,13 @@ def run_analysis(
     try:
         doses_risk = np.array(sorted(risk_df.index))
         risk_vals_emp = np.array([risk_df.loc[d] for d in doses_risk])
-        popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp,
-                                p0=[50, 0.1], maxfev=100000)
+        popt_log, _ = curve_fit(
+            risk_logistic_adj, 
+            doses_risk, 
+            risk_vals_emp,
+            p0=[50, 0.1], 
+            maxfev=20000
+        )
         fig_log, ax3 = plt.subplots()
         d_grid_log = np.linspace(doses_risk.min(), doses_risk.max() * 1.2, 150)
         risk_log_pred = risk_logistic_adj(d_grid_log, *popt_log)
@@ -403,13 +426,11 @@ def run_analysis(
     text_log = "Скорректированная логистическая функция:\n"
     text_log += "r(d) = [ f(d) - f(0) ] / [ 1 - f(0) ], где f(d) = 1/[1 + exp(-B*(d - A))].\n\n"
 
-    user_risk = risk_input
     if popt_log is not None:
-        # Добавим вывод параметров A и B
         A_est, B_est = popt_log
         text_log += f"Параметры логистической модели: A={A_est:.5f}, B={B_est:.5f}\n"
-        user_risk_dose = find_dose_for_risk_adj(user_risk, A_est, B_est)
-        text_log += f"\nВведённый риск: {user_risk:.5f} => Dose={user_risk_dose:.5f}\n\n"
+        user_risk_dose = find_dose_for_risk_adj(risk_input, A_est, B_est)
+        text_log += f"\nВведённый риск: {risk_input:.5f} => Dose={user_risk_dose:.5f}\n\n"
         standard_risks = [1e-3, 1e-4, 1e-5]
         for rr in standard_risks:
             dd_ = find_dose_for_risk_adj(rr, A_est, B_est)
