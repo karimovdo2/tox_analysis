@@ -199,7 +199,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                 replacements += 1
                 group_current = df[df["Dose"] == current_dose]
                 mean_current = group_current["PC1"].mean()
-
         # Шаг 9.2: корректировка по объединённой выборке из предыдущей и следующей групп
         for i in range(1, len(positive_doses)-1):
             current_dose = positive_doses[i]
@@ -233,6 +232,65 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                                      threshold=outlier_threshold,
                                      groups_to_clean=groups_to_clean)
 
+    # Вычисляем эмпирический риск по PC1_out
+    df_control = df[df["Dose"] == 0]
+    if len(df_control) == 0:
+        mu_c = df["PC1"].mean()
+        sd_c = df["PC1"].std()
+    else:
+        mu_c = df_control["PC1"].mean()
+        sd_c = df_control["PC1"].std()
+    low_bound = mu_c - 2 * sd_c
+    up_bound = mu_c + 2 * sd_c
+    df["PC1_out"] = ~df["PC1"].between(low_bound, up_bound)
+    risk_df = df.groupby("Dose")["PC1_out"].mean()
+    if 0 in risk_df.index:
+        risk_df.loc[0] = 0.0
+
+    # Новое правило для корректировки риска: 
+    # Если разница между риском текущей и предыдущей группы (> 0) превышает 0.5, 
+    # то для предыдущей группы (если ее доза не 0) увеличить риск на 0.1 (в цикле, пока разница не станет ≤ 0.5)
+    sorted_doses = sorted(risk_df.index)
+    risk_updated = risk_df.copy()
+    for i in range(1, len(sorted_doses)):
+        dose_curr = sorted_doses[i]
+        dose_prev = sorted_doses[i-1]
+        if dose_prev == 0:
+            continue
+        while risk_updated[dose_curr] - risk_updated[dose_prev] > 0.5:
+            risk_updated[dose_prev] += 0.1
+            if risk_updated[dose_prev] >= risk_updated[dose_curr]:
+                risk_updated[dose_prev] = risk_updated[dose_curr] - 0.001
+                break
+    risk_df = risk_updated
+    # Выводим обновлённые значения риска для оценки
+    st.write("Updated risk values for logistic model:", risk_df)
+
+    fig_emp, ax2 = plt.subplots()
+    ax2.plot(risk_df.index, risk_df.values * 100, 'ro-')
+    ax2.set_xlabel("Dose")
+    ax2.set_ylabel("Risk (%)")
+    ax2.set_title("Empirical Risk")
+
+    try:
+        doses_risk = np.array(sorted(risk_df.index))
+        risk_vals_emp = np.array([risk_df.loc[d] for d in doses_risk])
+        popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp, p0=[50, 0.1], maxfev=20000)
+        fig_log, ax3 = plt.subplots()
+        d_grid_log = np.linspace(doses_risk.min(), doses_risk.max() * 1.2, 150)
+        risk_log_pred = risk_logistic_adj(d_grid_log, *popt_log)
+        ax3.scatter(doses_risk, risk_vals_emp, c='r', label="Empirical Risk")
+        ax3.plot(d_grid_log, risk_log_pred, 'g-', label="Adjusted Logistic fit")
+        ax3.set_xlabel("Dose")
+        ax3.set_ylabel("Risk (0..1)")
+        ax3.set_title("Adjusted Logistic Risk Model")
+        ax3.legend()
+    except RuntimeError:
+        popt_log = None
+        fig_log, ax_ = plt.subplots()
+        ax_.text(0.1, 0.5, "Logistic model fitting failed.", fontsize=12)
+        ax_.set_title("Adjusted Logistic Risk Model")
+
     dose_vals = df["Dose"].values
     pc1_vals = df["PC1"].values
     model_candidates = [
@@ -264,48 +322,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     pc1_0 = best_func(0, *best_params)
     target_pc1 = pc1_0 * 1.05
     bmd_5pct = find_dose_for_target(target_pc1, best_func, best_params, d_min=0, d_max=1000, step=0.1)
-
-    df_control = df[df["Dose"] == 0]
-    if len(df_control) == 0:
-        mu_c = df["PC1"].mean()
-        sd_c = df["PC1"].std()
-    else:
-        mu_c = df_control["PC1"].mean()
-        sd_c = df_control["PC1"].std()
-    low_bound = mu_c - 2 * sd_c
-    up_bound = mu_c + 2 * sd_c
-    df["PC1_out"] = ~df["PC1"].between(low_bound, up_bound)
-    risk_df = df.groupby("Dose")["PC1_out"].mean()
-    if 0 in risk_df.index:
-        risk_df.loc[0] = 0.0
-
-    fig_emp, ax2 = plt.subplots()
-    ax2.plot(risk_df.index, risk_df.values * 100, 'ro-')
-    ax2.set_xlabel("Dose")
-    ax2.set_ylabel("Risk (%)")
-    ax2.set_title("Empirical Risk")
-
-    try:
-        doses_risk = np.array(sorted(risk_df.index))
-        risk_vals_emp = np.array([risk_df.loc[d] for d in doses_risk])
-        # Выводим значения, на которых строится логистическая модель риска
-        st.write("Doses used for risk model:", doses_risk)
-        st.write("Empirical risk values:", risk_vals_emp)
-        popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp, p0=[50, 0.1], maxfev=20000)
-        fig_log, ax3 = plt.subplots()
-        d_grid_log = np.linspace(doses_risk.min(), doses_risk.max() * 1.2, 150)
-        risk_log_pred = risk_logistic_adj(d_grid_log, *popt_log)
-        ax3.scatter(doses_risk, risk_vals_emp, c='r', label="Empirical Risk")
-        ax3.plot(d_grid_log, risk_log_pred, 'g-', label="Adjusted Logistic fit")
-        ax3.set_xlabel("Dose")
-        ax3.set_ylabel("Risk (0..1)")
-        ax3.set_title("Adjusted Logistic Risk Model")
-        ax3.legend()
-    except RuntimeError:
-        popt_log = None
-        fig_log, ax_ = plt.subplots()
-        ax_.text(0.1, 0.5, "Logistic model fitting failed.", fontsize=12)
-        ax_.set_title("Adjusted Logistic Risk Model")
 
     text_log = "Скорректированная логистическая функция:\n"
     text_log += "r(d) = [ f(d) - f(0) ] / [ 1 - f(0) ], где f(d) = 1/[1 + exp(-B*(d - A))].\n\n"
@@ -341,7 +357,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
 def main():
     st.title("Анализ токсичности (Web-приложение)")
     st.write("Загрузите Excel-файл, выберите параметры и нажмите 'Запустить анализ'.")
-
     uploaded_file = st.file_uploader("Выберите Excel-файл (.xlsx)", type=["xlsx"])
     remove_outliers = st.checkbox("Удалять выбросы (PC1)?", value=True)
     outlier_threshold = st.number_input("Порог выбросов (Z-score):", value=2.0)
@@ -350,7 +365,6 @@ def main():
     normalize_control = st.checkbox("Нормализация контрольной группы.", value=False)
     normalize_experimental = st.checkbox("Нормализация опытных групп.", value=False)
     slope_threshold = st.number_input("Порог наклона лог. регрессии:", value=5.0)
-
     if st.button("Запустить анализ"):
         if uploaded_file is None:
             st.error("Ошибка: Excel-файл не выбран.")
