@@ -149,7 +149,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     # Ищем столбец с дозой
     dose_col = None
     for c in df.columns:
-        if c.lower() in ["doza","dose","доза","доза_"] or c.upper() == "DOZA":
+        if c.lower() in ["doza", "dose", "доза", "доза_"] or c.upper() == "DOZA":
             dose_col = c
             break
     if dose_col is None:
@@ -182,8 +182,9 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     df["PC1"] = X_pca[:,0]
 
     # Нормализация контрольной группы (Dose==0), если галочка включена.
-    # Итеративно заменяем одно самое большое значение (на медиану остальных)
-    # до тех пор, пока среднее значение контрольной группы не станет ниже среднего в группе с минимальной положительной дозой.
+    # Итеративно заменяем одно самое большое значение (на новое, вычисленное следующим образом):
+    # берем все значения из группы 0, которые ниже среднего значения группы с минимальной положительной дозой,
+    # случайным образом отбрасываем половину этих значений, вычисляем среднее оставшихся и используем его для замены.
     if normalize_control:
         control_mask = (df["Dose"] == 0)
         if control_mask.sum() > 0:
@@ -195,15 +196,21 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                 while True:
                     group0 = df[df["Dose"] == 0]
                     if len(group0) <= 1:
-                        break  # Если в группе 0 один элемент или нет, остановить итерации
+                        break  # Если в группе 0 один элемент или нет, прекращаем итерации
                     mean_control = group0["PC1"].mean()
                     if mean_control <= mean_min:
                         break
                     # Находим индекс с максимальным значением PC1 в группе 0
                     idx_max = group0["PC1"].idxmax()
-                    # Вычисляем медиану оставшихся значений в контрольной группе
-                    new_value = group0.drop(idx_max)["PC1"].median()
-                    # Заменяем значение с индексом idx_max
+                    # Из группы 0 выбираем значения, которые ниже mean_min
+                    valid_control = group0[group0["PC1"] < mean_min]["PC1"]
+                    if len(valid_control) == 0:
+                        break  # Если нет подходящих значений, прерываем цикл
+                    # Случайным образом отбрасываем половину значений
+                    sample_valid = valid_control.sample(frac=0.5, random_state=42)
+                    # Вычисляем среднее значение оставшихся
+                    new_value = sample_valid.mean()
+                    # Заменяем найденное максимальное значение
                     df.loc[idx_max, "PC1"] = new_value
 
     # Удаляем выбросы
@@ -223,11 +230,11 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     dose_vals = df["Dose"].values
     pc1_vals = df["PC1"].values
     model_candidates = [
-        ("Linear", model_linear, [0,0]),
-        ("Quadratic", model_quadratic, [0,0,0]),
-        ("Log", model_log, [0,0]),
-        ("Exponential", model_exp, [0,1,0]),
-        ("Power", model_power, [0,1,1])
+        ("Linear", model_linear, [0, 0]),
+        ("Quadratic", model_quadratic, [0, 0, 0]),
+        ("Log", model_log, [0, 0]),
+        ("Exponential", model_exp, [0, 1, 0]),
+        ("Power", model_power, [0, 1, 1])
     ]
     results = []
     for (mname, mfunc, p0) in model_candidates:
@@ -235,13 +242,13 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
         results.append((mname, r_))
     results_sorted = sorted(results, key=lambda x: x[1]["AIC"])
     best_name, best_res = results_sorted[0]
-    best_func = [x for x in model_candidates if x[0]==best_name][0][1]
+    best_func = [x for x in model_candidates if x[0] == best_name][0][1]
     best_params = best_res["params"]
 
     # График PC1
     fig_pc1, ax1 = plt.subplots()
     ax1.scatter(dose_vals, pc1_vals, alpha=0.6, label="Data PC1")
-    dose_grid = np.linspace(dose_vals.min(), dose_vals.max(),200)
+    dose_grid = np.linspace(dose_vals.min(), dose_vals.max(), 200)
     pc1_pred = best_func(dose_grid, *best_params)
     ax1.plot(dose_grid, pc1_pred, 'r--', label=f"{best_name} fit")
     ax1.set_xlabel("Dose")
@@ -256,25 +263,23 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                                     d_min=0, d_max=1000, step=0.1)
 
     # Empirical Risk
-    df_control = df[df["Dose"]==0]
-    if len(df_control)==0:
-        # на случай, если нет группы Dose=0
+    df_control = df[df["Dose"] == 0]
+    if len(df_control) == 0:
         mu_c = df["PC1"].mean()
         sd_c = df["PC1"].std()
     else:
         mu_c = df_control["PC1"].mean()
         sd_c = df_control["PC1"].std()
-    low_bound = mu_c - 2*sd_c
-    up_bound = mu_c + 2*sd_c
+    low_bound = mu_c - 2 * sd_c
+    up_bound = mu_c + 2 * sd_c
     df["PC1_out"] = ~df["PC1"].between(low_bound, up_bound)
     risk_df = df.groupby("Dose")["PC1_out"].mean()
 
-    # Если есть 0 в индексах, считаем, что риск = 0
     if 0 in risk_df.index:
         risk_df.loc[0] = 0.0
 
     fig_emp, ax2 = plt.subplots()
-    ax2.plot(risk_df.index, risk_df.values*100, 'ro-')
+    ax2.plot(risk_df.index, risk_df.values * 100, 'ro-')
     ax2.set_xlabel("Dose")
     ax2.set_ylabel("Risk (%)")
     ax2.set_title("Empirical Risk")
@@ -284,9 +289,9 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     risk_vals_emp = np.array([risk_df.loc[d_] for d_ in doses_risk])
     try:
         popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp,
-                                p0=[50,0.1], maxfev=100000)
+                                p0=[50, 0.1], maxfev=100000)
         fig_log, ax3 = plt.subplots()
-        d_grid_log = np.linspace(doses_risk.min(), doses_risk.max()*1.2, 150)
+        d_grid_log = np.linspace(doses_risk.min(), doses_risk.max() * 1.2, 150)
         risk_log_pred = risk_logistic_adj(d_grid_log, *popt_log)
         ax3.scatter(doses_risk, risk_vals_emp, c='r', label="Empirical Risk")
         ax3.plot(d_grid_log, risk_log_pred, 'g-', label="Adjusted Logistic fit")
@@ -297,10 +302,9 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     except RuntimeError:
         popt_log = None
         fig_log, ax_ = plt.subplots()
-        ax_.text(0.1,0.5,"Logistic model fitting failed.", fontsize=12)
+        ax_.text(0.1, 0.5, "Logistic model fitting failed.", fontsize=12)
         ax_.set_title("Adjusted Logistic Risk Model")
 
-    # Тексты
     text_log = (
         "Скорректированная логистическая функция:\n"
         "r(d) = (f(d) - f(0)) / [1 - f(0)], где f(d) = 1/[1 + exp(-B(d - A))].\n\n"
@@ -309,7 +313,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     if popt_log is not None:
         user_risk_dose = find_dose_for_risk_adj(user_risk, *popt_log)
         text_log += f"Введённый риск: {user_risk:.5f} => Dose={user_risk_dose:.5f}\n\n"
-        # Стандартные риски
         standard_risks = [1e-3, 1e-4, 1e-5]
         for rr in standard_risks:
             dd_ = find_dose_for_risk_adj(rr, *popt_log)
@@ -324,7 +327,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     )
     text_emp = "Эмпирический риск PC1-out (двухстандартное отклонение)."
 
-    # Возвращаем результаты
     results = {
         "fig_log": fig_log,
         "text_log": text_log,
@@ -340,11 +342,10 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
 # STREAMLIT ПРИЛОЖЕНИЕ
 ###############################################################################
 def main():
-    st.title("Анализ токсичности (Web-приложение)")
+    st.title("Анализ токсичности")
 
     st.write("Загрузите Excel-файл, выберите параметры и нажмите 'Запустить анализ'.")
 
-    # Поля ввода
     uploaded_file = st.file_uploader("Выберите Excel-файл (.xlsx)", type=["xlsx"])
     remove_outliers = st.checkbox("Удалять выбросы (PC1)?", value=True)
     outlier_threshold = st.number_input("Порог выбросов (Z-score):", value=2.0)
@@ -352,12 +353,10 @@ def main():
     risk_str = st.text_input("Уровень риска (пример: 1e-4):", value="1e-4")
     normalize_control = st.checkbox("Нормализация контрольной группы.", value=False)
 
-    # Кнопка
     if st.button("Запустить анализ"):
         if uploaded_file is None:
             st.error("Ошибка: Excel-файл не выбран.")
         else:
-            # Проверяем риск
             try:
                 user_risk_val = float(risk_str)
             except:
@@ -365,7 +364,6 @@ def main():
                 return
 
             with st.spinner("Идёт анализ..."):
-                # Вызываем run_analysis с новым параметром normalize_control
                 result, err_msg = run_analysis(
                     file=uploaded_file,
                     remove_outliers=remove_outliers,
@@ -378,20 +376,16 @@ def main():
             if err_msg:
                 st.error(f"Ошибка: {err_msg}")
             else:
-                # Выводим результаты
                 st.subheader("Результаты")
 
-                # 1) Логистическая модель
                 st.write("### Adjusted Logistic Risk Model")
                 st.pyplot(result["fig_log"])
                 st.text(result["text_log"])
 
-                # 2) PC1 - Dose
                 st.write("### PC1 - Dose")
                 st.pyplot(result["fig_pc1"])
                 st.text(result["text_pc1"])
 
-                # 3) Empirical Risk
                 st.write("### Empirical Risk")
                 st.pyplot(result["fig_emp"])
                 st.text(result["text_emp"])
@@ -401,4 +395,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
