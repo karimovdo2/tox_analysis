@@ -124,19 +124,24 @@ def find_dose_for_risk_adj(r, A, B):
 ###############################################################################
 # ОСНОВНАЯ ФУНКЦИЯ
 ###############################################################################
-def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_input):
+def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_input, normalize_control):
     """Принимает:
        - file (UploadedFile объект или путь),
        - remove_outliers (bool),
        - outlier_threshold (float),
        - groups_text (строка вида '50,100'),
-       - risk_input (float) — уровень риска.
+       - risk_input (float) — уровень риска,
+       - normalize_control (bool) — флаг нормализации контрольной группы.
        Возвращает словарь с графиками и текстовыми результатами.
     """
     # Читаем Excel из UploadedFile напрямую:
     df = pd.read_excel(file)
 
-    # Транслитерация
+    # Проверка и очистка числовых данных: пытаемся преобразовать все столбцы в числовой формат.
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Транслитерация названий столбцов
     old_cols = df.columns.tolist()
     new_cols = [transliterate_column_name(col) for col in old_cols]
     df.columns = new_cols
@@ -154,7 +159,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     all_cols = df.columns.tolist()
     predictors = [col for col in all_cols if col != "Dose"]
 
-    # Заполняем пропуски
+    # Заполняем пропуски медианными значениями
     for col in predictors:
         df[col].fillna(df[col].median(), inplace=True)
 
@@ -175,6 +180,25 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     pca = PCA(n_components=5)
     X_pca = pca.fit_transform(X_scaled)
     df["PC1"] = X_pca[:,0]
+
+    # Нормализация контрольной группы (Dose==0), если галочка включена
+    if normalize_control:
+        control_mask = (df["Dose"] == 0)
+        if control_mask.sum() > 0:
+            positive_mask = (df["Dose"] > 0)
+            if positive_mask.sum() > 0:
+                min_positive = df.loc[positive_mask, "Dose"].min()
+                group_min = df[df["Dose"] == min_positive]
+                mean_min = group_min["PC1"].mean()
+                group0 = df[control_mask]
+                mean_control = group0["PC1"].mean()
+                if mean_control > mean_min:
+                    valid_control = group0[group0["PC1"] < mean_min]["PC1"]
+                    if len(valid_control) > 0:
+                        # Случайным образом отбрасываем половину значений
+                        sample_valid = valid_control.sample(frac=0.5, random_state=42)
+                        new_control_mean = sample_valid.mean()
+                        df.loc[control_mask, "PC1"] = new_control_mean
 
     # Удаляем выбросы
     if remove_outliers:
@@ -320,6 +344,7 @@ def main():
     outlier_threshold = st.number_input("Порог выбросов (Z-score):", value=2.0)
     groups_text = st.text_input("Группы доз (через запятую, например 50,100):", value="")
     risk_str = st.text_input("Уровень риска (пример: 1e-4):", value="1e-4")
+    normalize_control = st.checkbox("Нормализация контрольной группы.", value=False)
 
     # Кнопка
     if st.button("Запустить анализ"):
@@ -334,13 +359,14 @@ def main():
                 return
 
             with st.spinner("Идёт анализ..."):
-                # Вызываем run_analysis
+                # Вызываем run_analysis с новым параметром normalize_control
                 result, err_msg = run_analysis(
                     file=uploaded_file,
                     remove_outliers=remove_outliers,
                     outlier_threshold=outlier_threshold,
                     groups_text=groups_text,
-                    risk_input=user_risk_val
+                    risk_input=user_risk_val,
+                    normalize_control=normalize_control
                 )
 
             if err_msg:
