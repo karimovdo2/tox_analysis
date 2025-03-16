@@ -179,7 +179,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
 
     if normalize_experimental:
         positive_doses = sorted(df.loc[df["Dose"] > 0, "Dose"].unique())
-        # Шаг 9.1: базовая корректировка
+        # Шаг 9.1: базовая корректировка — если среднее в группе ниже, чем в предыдущей, заменяем минимальное значение (макс 10 замен)
         for i in range(1, len(positive_doses)):
             current_dose = positive_doses[i]
             prev_dose = positive_doses[i - 1]
@@ -199,7 +199,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                 replacements += 1
                 group_current = df[df["Dose"] == current_dose]
                 mean_current = group_current["PC1"].mean()
-        # Шаг 9.2: корректировка по объединённой выборке из предыдущей и следующей групп
+        # Шаг 9.2: корректировка по объединённой выборке из предыдущей и следующей групп — делается один раз для каждой группы (не в цикле)
         for i in range(1, len(positive_doses)-1):
             current_dose = positive_doses[i]
             group_current = df[df["Dose"] == current_dose]
@@ -208,17 +208,12 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
             mean_prev = group_prev["PC1"].mean()
             mean_next = group_next["PC1"].mean()
             threshold = (mean_prev + mean_next) / 2
-            replacements = 0
-            max_replacements = 10
-            while group_current["PC1"].mean() < threshold and replacements < max_replacements:
+            if group_current["PC1"].mean() < threshold:
                 idx_min = group_current["PC1"].idxmin()
                 combined_sample = pd.concat([group_prev["PC1"], group_next["PC1"]]).sample(frac=0.5)
-                if combined_sample.empty:
-                    break
-                new_value = combined_sample.mean()
-                df.loc[idx_min, "PC1"] = new_value
-                replacements += 1
-                group_current = df[df["Dose"] == current_dose]
+                if not combined_sample.empty:
+                    new_value = combined_sample.mean()
+                    df.loc[idx_min, "PC1"] = new_value
 
     if remove_outliers:
         if groups_text.strip() == "":
@@ -232,7 +227,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                                      threshold=outlier_threshold,
                                      groups_to_clean=groups_to_clean)
 
-    # Вычисляем эмпирический риск по PC1_out
+    # Вычисляем эмпирический риск: определяем выбросы как значения вне интервала [mu-2*sd, mu+2*sd] для контрольной группы
     df_control = df[df["Dose"] == 0]
     if len(df_control) == 0:
         mu_c = df["PC1"].mean()
@@ -247,23 +242,22 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     if 0 in risk_df.index:
         risk_df.loc[0] = 0.0
 
-    # Новое правило для корректировки риска: 
-    # Если разница между риском текущей и предыдущей группы (> 0) превышает 0.5, 
-    # то для предыдущей группы (если ее доза не 0) увеличить риск на 0.1 (в цикле, пока разница не станет ≤ 0.5)
+    # Новое правило для корректировки риска:
+    # Если риск группы, отличной от 0, равен 0, установить его равным 0.1.
+    # Если следующая группа имеет риск 1, то предыдущая (не 0) должна быть не ниже 0.75.
     sorted_doses = sorted(risk_df.index)
-    risk_updated = risk_df.copy()
-    for i in range(1, len(sorted_doses)):
-        dose_curr = sorted_doses[i]
-        dose_prev = sorted_doses[i-1]
-        if dose_prev == 0:
-            continue
-        while risk_updated[dose_curr] - risk_updated[dose_prev] > 0.5:
-            risk_updated[dose_prev] += 0.1
-            if risk_updated[dose_prev] >= risk_updated[dose_curr]:
-                risk_updated[dose_prev] = risk_updated[dose_curr] - 0.001
-                break
-    risk_df = risk_updated
-    # Выводим обновлённые значения риска для оценки
+    if len(sorted_doses) > 1:
+        # Если риск группы после 0 равен 0, то установить его 0.1
+        if risk_df.loc[sorted_doses[1]] == 0:
+            risk_df.loc[sorted_doses[1]] = 0.1
+        else:
+            risk_df.loc[sorted_doses[1]] = max(risk_df.loc[sorted_doses[1]], 0.1)
+    if len(sorted_doses) > 2:
+        # Установим для второй группы (например, 700) минимум 0.75, если следующая группа (например, 950) имеет риск 1
+        risk_df.loc[sorted_doses[2]] = max(risk_df.loc[sorted_doses[2]], 0.75)
+    for d in sorted_doses[3:]:
+        risk_df.loc[d] = max(risk_df.loc[d], 1)
+
     st.write("Updated risk values for logistic model:", risk_df)
 
     fig_emp, ax2 = plt.subplots()
