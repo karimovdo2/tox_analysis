@@ -121,19 +121,12 @@ def find_dose_for_risk_adj(r, A, B):
 ###############################################################################
 def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_input,
                  normalize_control, normalize_experimental, slope_threshold=5):
-    # 1. Чтение Excel
     df = pd.read_excel(file)
-
-    # 2. Преобразуем все столбцы в числовой формат
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    # 3. Транслитерация названий столбцов
     old_cols = df.columns.tolist()
     new_cols = [transliterate_column_name(col) for col in old_cols]
     df.columns = new_cols
-
-    # 4. Поиск столбца "Dose"
     dose_col = None
     for c in df.columns:
         if c.lower() in ["doza", "dose", "доза", "доза_"] or c.upper() == "DOZA":
@@ -142,14 +135,10 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     if dose_col is None:
         return None, "Столбец с дозой не найден."
     df.rename(columns={dose_col: "Dose"}, inplace=True)
-
-    # 5. Заполнение пропусков медианами
     all_cols = df.columns.tolist()
     predictors = [col for col in all_cols if col != "Dose"]
     for col in predictors:
         df[col].fillna(df[col].median(), inplace=True)
-
-    # 6. Удаляем столбцы без значений
     grouped = df.groupby("Dose")
     cols_to_drop = []
     for col in predictors:
@@ -158,8 +147,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     cols_to_drop = list(set(cols_to_drop))
     df.drop(columns=cols_to_drop, inplace=True)
     final_predictors = [col for col in predictors if col not in cols_to_drop]
-
-    # 7. PCA -> PC1
     X = df[final_predictors].values
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
@@ -167,7 +154,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     X_pca = pca.fit_transform(X_scaled)
     df["PC1"] = X_pca[:, 0]
 
-    # 8. Нормализация контрольной группы (Dose == 0)
     if normalize_control:
         control_mask = (df["Dose"] == 0)
         if control_mask.sum() > 0:
@@ -191,13 +177,9 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                     new_value = sample_valid.mean()
                     df.loc[idx_max, "PC1"] = new_value
 
-    # 9. Нормализация опытных групп
     if normalize_experimental:
-        st.write("=== Начинаем нормализацию опытных групп ===")
         positive_doses = sorted(df.loc[df["Dose"] > 0, "Dose"].unique())
-
-        # 9.1. Базовая корректировка: если среднее в группе ниже, чем в предыдущей, заменяем минимальное значение.
-        st.write("Шаг 9.1: Базовая корректировка (не более 10 замен на группу)")
+        # Шаг 9.1: базовая корректировка
         for i in range(1, len(positive_doses)):
             current_dose = positive_doses[i]
             prev_dose = positive_doses[i - 1]
@@ -205,25 +187,20 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
             group_prev = df[df["Dose"] == prev_dose]
             mean_current = group_current["PC1"].mean()
             mean_prev = group_prev["PC1"].mean()
-            st.write(f"[Доза={current_dose}] среднее={mean_current:.4f}, [Предыдущая={prev_dose}] среднее={mean_prev:.4f}")
             replacements = 0
             max_replacements = 10
             while mean_current < mean_prev and replacements < max_replacements:
                 idx_min = group_current["PC1"].idxmin()
                 sample_prev = group_prev["PC1"].sample(frac=0.5)
                 if sample_prev.empty:
-                    st.write("   Нет доступных значений для выборки; прерываем цикл.")
                     break
                 new_value = sample_prev.mean()
-                st.write(f"   -> Заменяем минимальное значение в группе {current_dose} на {new_value:.4f}")
                 df.loc[idx_min, "PC1"] = new_value
                 replacements += 1
                 group_current = df[df["Dose"] == current_dose]
                 mean_current = group_current["PC1"].mean()
-                st.write(f"   Новое среднее: {mean_current:.4f} (кол-во замен={replacements})")
 
-        # 9.2. Дополнительная корректировка для групп, которые имеют предыдущую и следующую
-        st.write("Шаг 9.2: Корректировка по среднему из предыдущей и следующей групп (для групп не крайних)")
+        # Шаг 9.2: корректировка по объединённой выборке из предыдущей и следующей групп
         for i in range(1, len(positive_doses)-1):
             current_dose = positive_doses[i]
             group_current = df[df["Dose"] == current_dose]
@@ -232,24 +209,18 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
             mean_prev = group_prev["PC1"].mean()
             mean_next = group_next["PC1"].mean()
             threshold = (mean_prev + mean_next) / 2
-            st.write(f"[Доза={current_dose}] среднее={group_current['PC1'].mean():.4f}, порог (с групп {positive_doses[i-1]} и {positive_doses[i+1]}) = {threshold:.4f}")
             replacements = 0
             max_replacements = 10
             while group_current["PC1"].mean() < threshold and replacements < max_replacements:
                 idx_min = group_current["PC1"].idxmin()
                 combined_sample = pd.concat([group_prev["PC1"], group_next["PC1"]]).sample(frac=0.5)
                 if combined_sample.empty:
-                    st.write("   Нет значений для объединенной выборки; прерываем цикл.")
                     break
                 new_value = combined_sample.mean()
-                st.write(f"   -> Заменяем минимальное значение в группе {current_dose} на {new_value:.4f}")
                 df.loc[idx_min, "PC1"] = new_value
                 replacements += 1
                 group_current = df[df["Dose"] == current_dose]
-                st.write(f"   Новое среднее в группе {current_dose}: {group_current['PC1'].mean():.4f} (заменено {replacements} раз)")
-        st.write("=== Завершили нормализацию опытных групп ===")
 
-    # 10. Удаляем выбросы
     if remove_outliers:
         if groups_text.strip() == "":
             groups_to_clean = None
@@ -262,7 +233,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                                      threshold=outlier_threshold,
                                      groups_to_clean=groups_to_clean)
 
-    # 11. Подбираем лучшую модель (Linear, Quadratic, Log, Exponential, Power)
     dose_vals = df["Dose"].values
     pc1_vals = df["PC1"].values
     model_candidates = [
@@ -281,7 +251,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     best_func = [x for x in model_candidates if x[0] == best_name][0][1]
     best_params = best_res["params"]
 
-    # 12. График PC1 ~ Dose
     fig_pc1, ax1 = plt.subplots()
     ax1.scatter(dose_vals, pc1_vals, alpha=0.6, label="Data PC1")
     dose_grid = np.linspace(dose_vals.min(), dose_vals.max(), 200)
@@ -292,13 +261,10 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     ax1.set_title("PC1 ~ Dose")
     ax1.legend()
 
-    # 13. BMD (5% прирост от PC1(0))
     pc1_0 = best_func(0, *best_params)
     target_pc1 = pc1_0 * 1.05
-    bmd_5pct = find_dose_for_target(target_pc1, best_func, best_params,
-                                    d_min=0, d_max=1000, step=0.1)
+    bmd_5pct = find_dose_for_target(target_pc1, best_func, best_params, d_min=0, d_max=1000, step=0.1)
 
-    # 14. Эмпирический риск (двухстандартное отклонение от контроля)
     df_control = df[df["Dose"] == 0]
     if len(df_control) == 0:
         mu_c = df["PC1"].mean()
@@ -319,12 +285,10 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     ax2.set_ylabel("Risk (%)")
     ax2.set_title("Empirical Risk")
 
-    # 15. Логистическая модель риска
     try:
         doses_risk = np.array(sorted(risk_df.index))
         risk_vals_emp = np.array([risk_df.loc[d] for d in doses_risk])
-        popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp,
-                                p0=[50, 0.1], maxfev=20000)
+        popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp, p0=[50, 0.1], maxfev=20000)
         fig_log, ax3 = plt.subplots()
         d_grid_log = np.linspace(doses_risk.min(), doses_risk.max() * 1.2, 150)
         risk_log_pred = risk_logistic_adj(d_grid_log, *popt_log)
@@ -340,7 +304,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
         ax_.text(0.1, 0.5, "Logistic model fitting failed.", fontsize=12)
         ax_.set_title("Adjusted Logistic Risk Model")
 
-    # 16. Формирование текстовых результатов
     text_log = "Скорректированная логистическая функция:\n"
     text_log += "r(d) = [ f(d) - f(0) ] / [ 1 - f(0) ], где f(d) = 1/[1 + exp(-B*(d - A))].\n\n"
     if popt_log is not None:
@@ -355,10 +318,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     else:
         text_log += "Логистическая модель не подогнана.\n"
 
-    text_pc1 = (
-        f"BMD (5% inc PC1) = {bmd_5pct:.4f} mg/kg\n"
-        f"Best PC1 model: {best_name}, params={best_params}\n"
-    )
+    text_pc1 = f"BMD (5% inc PC1) = {bmd_5pct:.4f} mg/kg\nBest PC1 model: {best_name}, params={best_params}\n"
     text_emp = "Эмпирический риск PC1-out (двухстандартное отклонение)."
 
     results = {
@@ -426,5 +386,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
