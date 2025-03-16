@@ -58,7 +58,7 @@ def format_sci_custom(num, precision=1):
         return f"{base}×10{exp_str}"
 
 ###############################################################################
-# МОДЕЛИ ДЛЯ PC1
+# МОДЕЛИ
 ###############################################################################
 def model_linear(d, a, b):
     return a + b*d
@@ -105,26 +105,11 @@ def find_dose_for_target(target_val, model_func, params,
             best_d = x
     return best_d
 
-###############################################################################
-# МОДЕЛИ ДЛЯ РИСКА
-###############################################################################
 def risk_logistic_adj(d, A, B):
     """Скорректированная логистическая модель: r(0)=0, r(∞)=1"""
     f0 = 1.0 / (1.0 + np.exp(B*A))
     f_d = 1.0 / (1.0 + np.exp(-B*(d - A)))
     return (f_d - f0)/(1 - f0)
-
-def risk_linear(d, A, B):
-    return A + B * d
-
-def risk_quadratic(d, A, B, C):
-    return A + B * d + C * (d**2)
-
-def risk_cubic(d, A, B, C, D):
-    return A + B * d + C * (d**2) + D * (d**3)
-
-def risk_exponential(d, A, B, C):
-    return A + B * np.exp(C * d)
 
 def find_dose_for_risk_adj(r, A, B):
     if r < 0 or r >= 1:
@@ -139,7 +124,7 @@ def find_dose_for_risk_adj(r, A, B):
 ###############################################################################
 # ОСНОВНАЯ ФУНКЦИЯ
 ###############################################################################
-def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_input, normalize_control, normalize_experimental, risk_model_choice):
+def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_input, normalize_control, normalize_experimental, slope_threshold=5):
     """Принимает:
        - file (UploadedFile объект или путь),
        - remove_outliers (bool),
@@ -148,7 +133,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
        - risk_input (float) — уровень риска,
        - normalize_control (bool) — нормализация контрольной группы,
        - normalize_experimental (bool) — нормализация опытных групп,
-       - risk_model_choice (str) — выбранная модель для предсказания риска.
+       - slope_threshold (float) — порог наклона логистической регрессии (по умолчанию 5).
        Возвращает словарь с графиками и текстовыми результатами.
     """
     # Читаем Excel из UploadedFile
@@ -198,7 +183,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     X_pca = pca.fit_transform(X_scaled)
     df["PC1"] = X_pca[:, 0]
 
-    # Нормализация контрольной группы (Dose==0)
+    # Нормализация контрольной группы (Dose==0), если галочка включена.
     if normalize_control:
         control_mask = (df["Dose"] == 0)
         if control_mask.sum() > 0:
@@ -222,7 +207,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                     new_value = sample_valid.mean()
                     df.loc[idx_max, "PC1"] = new_value
 
-    # Нормализация опытных групп (Dose > 0)
+    # Первичная нормализация опытных групп (Dose > 0)
     if normalize_experimental:
         positive_doses = sorted(df.loc[df["Dose"] > 0, "Dose"].unique())
         for i in range(1, len(positive_doses)):
@@ -234,13 +219,63 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
             mean_prev = group_prev["PC1"].mean()
             while mean_current < mean_prev:
                 idx_min = group_current["PC1"].idxmin()
-                sample_prev = group_prev["PC1"].sample(frac=0.5)
+                sample_prev = group_prev["PC1"].sample(frac=0.5, random_state=42)
                 if sample_prev.empty:
                     break
                 new_value = sample_prev.mean()
                 df.loc[idx_min, "PC1"] = new_value
                 group_current = df[df["Dose"] == current_dose]
                 mean_current = group_current["PC1"].mean()
+
+        # Дополнительная корректировка, если наклон логистической регрессии слишком крутой
+        try:
+            df_control_temp = df[df["Dose"] == 0]
+            if len(df_control_temp) == 0:
+                mu_c_temp = df["PC1"].mean()
+                sd_c_temp = df["PC1"].std()
+            else:
+                mu_c_temp = df_control_temp["PC1"].mean()
+                sd_c_temp = df_control_temp["PC1"].std()
+            low_bound_temp = mu_c_temp - 2 * sd_c_temp
+            up_bound_temp = mu_c_temp + 2 * sd_c_temp
+            df["PC1_out_temp"] = ~df["PC1"].between(low_bound_temp, up_bound_temp)
+            risk_df_temp = df.groupby("Dose")["PC1_out_temp"].mean()
+            doses_risk_temp = np.array(sorted(risk_df_temp.index))
+            risk_vals_emp_temp = np.array([risk_df_temp.loc[d] for d in doses_risk_temp])
+            popt_log_temp, _ = curve_fit(risk_logistic_adj, doses_risk_temp, risk_vals_emp_temp,
+                                         p0=[50, 0.1], maxfev=100000)
+        except RuntimeError:
+            popt_log_temp = None
+
+        if popt_log_temp is not None and popt_log_temp[1] > slope_threshold:
+            # Поиск экспериментальной группы с резким подъемом PC1
+            sharp_group = None
+            sharp_diff = -np.inf
+            for i in range(1, len(positive_doses)):
+                curr_dose = positive_doses[i]
+                prev_dose = positive_doses[i-1]
+                group_curr = df[df["Dose"] == curr_dose]
+                group_prev = df[df["Dose"] == prev_dose]
+                mean_curr = group_curr["PC1"].mean()
+                mean_prev = group_prev["PC1"].mean()
+                diff = mean_curr - mean_prev
+                if diff > sharp_diff:
+                    sharp_diff = diff
+                    sharp_group = curr_dose
+            # Если найдена такая группа, выполняем корректировку каждого наблюдения
+            sharp_index = positive_doses.index(sharp_group) if sharp_group is not None else None
+            # Для корректировки нужны и предыдущая, и последующая группы
+            if sharp_index is not None and sharp_index > 0 and sharp_index < len(positive_doses) - 1:
+                group_prev = df[df["Dose"] == positive_doses[sharp_index - 1]]
+                group_next = df[df["Dose"] == positive_doses[sharp_index + 1]]
+                group_sharp = df[df["Dose"] == sharp_group]
+                # Для каждого наблюдения в группе с резким подъемом
+                for idx in group_sharp.index:
+                    combined_values = pd.concat([group_prev["PC1"], group_next["PC1"]])
+                    sample_combined = combined_values.sample(frac=0.5)
+                    if not sample_combined.empty:
+                        new_value = sample_combined.mean()
+                        df.loc[idx, "PC1"] = new_value
 
     # Удаляем выбросы
     if remove_outliers:
@@ -255,7 +290,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                                      threshold=outlier_threshold,
                                      groups_to_clean=groups_to_clean)
 
-    # Ищем лучшую модель для PC1 ~ Dose
+    # Моделирование: ищем лучшую модель для зависимости PC1 от Dose
     dose_vals = df["Dose"].values
     pc1_vals = df["PC1"].values
     model_candidates = [
@@ -274,7 +309,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     best_func = [x for x in model_candidates if x[0] == best_name][0][1]
     best_params = best_res["params"]
 
-    # График PC1 ~ Dose
+    # Построение графика зависимости PC1 от Dose
     fig_pc1, ax1 = plt.subplots()
     ax1.scatter(dose_vals, pc1_vals, alpha=0.6, label="Data PC1")
     dose_grid = np.linspace(dose_vals.min(), dose_vals.max(), 200)
@@ -285,13 +320,13 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     ax1.set_title("PC1 ~ Dose")
     ax1.legend()
 
-    # BMD (5% прирост от PC1(0))
+    # Вычисление BMD (5% прирост от PC1(0))
     pc1_0 = best_func(0, *best_params)
     target_pc1 = pc1_0 * 1.05
     bmd_5pct = find_dose_for_target(target_pc1, best_func, best_params,
                                     d_min=0, d_max=1000, step=0.1)
 
-    # Empirical Risk
+    # Расчёт эмпирического риска (доля выбросов по 2σ)
     df_control = df[df["Dose"] == 0]
     if len(df_control) == 0:
         mu_c = df["PC1"].mean()
@@ -312,67 +347,41 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     ax2.set_ylabel("Risk (%)")
     ax2.set_title("Empirical Risk")
 
-    # Выбор модели для предсказания риска по выбору пользователя
-    if risk_model_choice == "Логистическая":
-        risk_func = risk_logistic_adj
-        p0_risk = [50, 0.1]
-    elif risk_model_choice == "Линейная":
-        risk_func = risk_linear
-        p0_risk = [0, 0]
-    elif risk_model_choice == "Квадратичная":
-        risk_func = risk_quadratic
-        p0_risk = [0, 0, 0]
-    elif risk_model_choice == "Кубическая":
-        risk_func = risk_cubic
-        p0_risk = [0, 0, 0, 0]
-    elif risk_model_choice == "Экспоненциальная":
-        risk_func = risk_exponential
-        p0_risk = [0, 1, 0]
-    else:
-        risk_func = risk_logistic_adj
-        p0_risk = [50, 0.1]
-
     try:
         doses_risk = np.array(sorted(risk_df.index))
-        risk_vals_emp = np.array([risk_df.loc[d_] for d_ in doses_risk])
-        popt_risk, _ = curve_fit(risk_func, doses_risk, risk_vals_emp, p0=p0_risk, maxfev=100000)
+        risk_vals_emp = np.array([risk_df.loc[d] for d in doses_risk])
+        popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp,
+                                p0=[50, 0.1], maxfev=100000)
         fig_log, ax3 = plt.subplots()
         d_grid_log = np.linspace(doses_risk.min(), doses_risk.max() * 1.2, 150)
-        risk_log_pred = risk_func(d_grid_log, *popt_risk)
+        risk_log_pred = risk_logistic_adj(d_grid_log, *popt_log)
         ax3.scatter(doses_risk, risk_vals_emp, c='r', label="Empirical Risk")
-        ax3.plot(d_grid_log, risk_log_pred, 'g-', label=f"{risk_model_choice} fit")
+        ax3.plot(d_grid_log, risk_log_pred, 'g-', label="Adjusted Logistic fit")
         ax3.set_xlabel("Dose")
         ax3.set_ylabel("Risk (0..1)")
-        ax3.set_title(f"Risk Model: {risk_model_choice}")
+        ax3.set_title("Adjusted Logistic Risk Model")
         ax3.legend()
     except RuntimeError:
-        popt_risk = None
-        fig_log, ax3 = plt.subplots()
-        ax3.text(0.1, 0.5, "Risk model fitting failed.", fontsize=12)
-        ax3.set_title(f"Risk Model: {risk_model_choice}")
+        popt_log = None
+        fig_log, ax_ = plt.subplots()
+        ax_.text(0.1, 0.5, "Logistic model fitting failed.", fontsize=12)
+        ax_.set_title("Adjusted Logistic Risk Model")
 
     text_log = (
-        f"Выбранная модель для предсказания риска: {risk_model_choice}\n"
-        "Приведённые параметры и значения получены по результатам аппроксимации.\n\n"
+        "Скорректированная логистическая функция:\n"
+        "r(d) = (f(d) - f(0)) / [1 - f(0)], где f(d) = 1/[1 + exp(-B(d - A))].\n\n"
     )
     user_risk = risk_input
-    if popt_risk is not None and risk_model_choice == "Логистическая":
-        # Только для логистической модели используется функция find_dose_for_risk_adj
-        user_risk_dose = find_dose_for_risk_adj(user_risk, *popt_risk)
+    if popt_log is not None:
+        user_risk_dose = find_dose_for_risk_adj(user_risk, *popt_log)
         text_log += f"Введённый риск: {user_risk:.5f} => Dose={user_risk_dose:.5f}\n\n"
-    elif popt_risk is not None:
-        text_log += f"Параметры модели: {popt_risk}\n\n"
-    else:
-        text_log += "Модель риска не подогнана.\n"
-
-    standard_risks = [1e-3, 1e-4, 1e-5]
-    for rr in standard_risks:
-        if popt_risk is not None and risk_model_choice == "Логистическая":
-            dd_ = find_dose_for_risk_adj(rr, *popt_risk)
+        standard_risks = [1e-3, 1e-4, 1e-5]
+        for rr in standard_risks:
+            dd_ = find_dose_for_risk_adj(rr, *popt_log)
             r_str = format_sci_custom(rr, precision=1)
             text_log += f"Risk={r_str} => Dose={dd_:.5f} mg/kg/day\n"
-        elif popt_risk is not None:
-            text_log += f"Risk={rr:.1e} (нет расчёта дозы для выбранной модели)\n"
+    else:
+        text_log += "Логистическая модель не подогнана.\n"
 
     text_pc1 = (
         f"BMD (5% inc PC1) = {bmd_5pct:.4f} mg/kg\n"
@@ -405,8 +414,7 @@ def main():
     risk_str = st.text_input("Уровень риска (пример: 1e-4):", value="1e-4")
     normalize_control = st.checkbox("Нормализация контрольной группы.", value=False)
     normalize_experimental = st.checkbox("Нормализация опытных групп.", value=False)
-    risk_model_choice = st.selectbox("Выберите модель для предсказания риска", 
-                                     options=["Логистическая", "Линейная", "Квадратичная", "Кубическая", "Экспоненциальная"])
+    slope_threshold = st.number_input("Порог наклона лог. регрессии:", value=5.0)
 
     if st.button("Запустить анализ"):
         if uploaded_file is None:
@@ -427,15 +435,14 @@ def main():
                     risk_input=user_risk_val,
                     normalize_control=normalize_control,
                     normalize_experimental=normalize_experimental,
-                    risk_model_choice=risk_model_choice
+                    slope_threshold=slope_threshold
                 )
 
             if err_msg:
                 st.error(f"Ошибка: {err_msg}")
             else:
                 st.subheader("Результаты")
-
-                st.write("### Модель риска")
+                st.write("### Adjusted Logistic Risk Model")
                 st.pyplot(result["fig_log"])
                 st.text(result["text_log"])
 
@@ -452,3 +459,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
