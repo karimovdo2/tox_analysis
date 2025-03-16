@@ -124,20 +124,21 @@ def find_dose_for_risk_adj(r, A, B):
 ###############################################################################
 # ОСНОВНАЯ ФУНКЦИЯ
 ###############################################################################
-def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_input, normalize_control):
+def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_input, normalize_control, normalize_experimental):
     """Принимает:
        - file (UploadedFile объект или путь),
        - remove_outliers (bool),
        - outlier_threshold (float),
        - groups_text (строка вида '50,100'),
        - risk_input (float) — уровень риска,
-       - normalize_control (bool) — флаг нормализации контрольной группы.
+       - normalize_control (bool) — нормализация контрольной группы,
+       - normalize_experimental (bool) — нормализация опытных групп.
        Возвращает словарь с графиками и текстовыми результатами.
     """
-    # Читаем Excel из UploadedFile напрямую:
+    # Читаем Excel из UploadedFile
     df = pd.read_excel(file)
 
-    # Проверка и очистка числовых данных: пытаемся преобразовать все столбцы в числовой формат.
+    # Преобразуем все столбцы в числовой формат
     for col in df.columns:
         df[col] = pd.to_numeric(df[col], errors='coerce')
 
@@ -155,7 +156,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     if dose_col is None:
         return None, "Столбец с дозой не найден."
 
-    df.rename(columns={dose_col:"Dose"}, inplace=True)
+    df.rename(columns={dose_col: "Dose"}, inplace=True)
     all_cols = df.columns.tolist()
     predictors = [col for col in all_cols if col != "Dose"]
 
@@ -179,12 +180,9 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     X_scaled = scaler.fit_transform(X)
     pca = PCA(n_components=5)
     X_pca = pca.fit_transform(X_scaled)
-    df["PC1"] = X_pca[:,0]
+    df["PC1"] = X_pca[:, 0]
 
     # Нормализация контрольной группы (Dose==0), если галочка включена.
-    # Итеративно заменяем одно самое большое значение (на новое, вычисленное следующим образом):
-    # берем все значения из группы 0, которые ниже среднего значения группы с минимальной положительной дозой,
-    # случайным образом отбрасываем половину этих значений, вычисляем среднее оставшихся и используем его для замены.
     if normalize_control:
         control_mask = (df["Dose"] == 0)
         if control_mask.sum() > 0:
@@ -196,22 +194,44 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                 while True:
                     group0 = df[df["Dose"] == 0]
                     if len(group0) <= 1:
-                        break  # Если в группе 0 один элемент или нет, прекращаем итерации
+                        break
                     mean_control = group0["PC1"].mean()
                     if mean_control <= mean_min:
                         break
-                    # Находим индекс с максимальным значением PC1 в группе 0
                     idx_max = group0["PC1"].idxmax()
-                    # Из группы 0 выбираем значения, которые ниже mean_min
                     valid_control = group0[group0["PC1"] < mean_min]["PC1"]
                     if len(valid_control) == 0:
-                        break  # Если нет подходящих значений, прерываем цикл
-                    # Случайным образом отбрасываем половину значений
+                        break
                     sample_valid = valid_control.sample(frac=0.5, random_state=42)
-                    # Вычисляем среднее значение оставшихся
                     new_value = sample_valid.mean()
-                    # Заменяем найденное максимальное значение
                     df.loc[idx_max, "PC1"] = new_value
+
+    # Нормализация опытных групп (Dose > 0), если галочка включена.
+    if normalize_experimental:
+        # Получаем уникальные положительные дозы, отсортированные по возрастанию
+        positive_doses = sorted(df.loc[df["Dose"] > 0, "Dose"].unique())
+        # Проходим по группам, начиная со второй (индекс 1)
+        for i in range(1, len(positive_doses)):
+            current_dose = positive_doses[i]
+            prev_dose = positive_doses[i - 1]
+            group_current = df[df["Dose"] == current_dose]
+            group_prev = df[df["Dose"] == prev_dose]
+            mean_current = group_current["PC1"].mean()
+            mean_prev = group_prev["PC1"].mean()
+            # Пока среднее в текущей группе меньше, чем в предыдущей, корректируем текущую группу
+            while mean_current < mean_prev:
+                # Берем индекс с минимальным значением PC1 в текущей группе
+                idx_min = group_current["PC1"].idxmin()
+                # Из группы с меньшей дозой выбираем случайным образом половину значений и находим их среднее
+                sample_prev = group_prev["PC1"].sample(frac=0.5)
+                if sample_prev.empty:
+                    break
+                new_value = sample_prev.mean()
+                # Заменяем минимальное значение в текущей группе
+                df.loc[idx_min, "PC1"] = new_value
+                # Обновляем группу и среднее
+                group_current = df[df["Dose"] == current_dose]
+                mean_current = group_current["PC1"].mean()
 
     # Удаляем выбросы
     if remove_outliers:
@@ -284,10 +304,9 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     ax2.set_ylabel("Risk (%)")
     ax2.set_title("Empirical Risk")
 
-    # Adjusted Logistic Risk
-    doses_risk = np.array(sorted(risk_df.index))
-    risk_vals_emp = np.array([risk_df.loc[d_] for d_ in doses_risk])
     try:
+        doses_risk = np.array(sorted(risk_df.index))
+        risk_vals_emp = np.array([risk_df.loc[d_] for d_ in doses_risk])
         popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp,
                                 p0=[50, 0.1], maxfev=100000)
         fig_log, ax3 = plt.subplots()
@@ -342,8 +361,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
 # STREAMLIT ПРИЛОЖЕНИЕ
 ###############################################################################
 def main():
-    st.title("Анализ токсичности")
-
+    st.title("Анализ токсичности (Web-приложение)")
     st.write("Загрузите Excel-файл, выберите параметры и нажмите 'Запустить анализ'.")
 
     uploaded_file = st.file_uploader("Выберите Excel-файл (.xlsx)", type=["xlsx"])
@@ -352,6 +370,7 @@ def main():
     groups_text = st.text_input("Группы доз (через запятую, например 50,100):", value="")
     risk_str = st.text_input("Уровень риска (пример: 1e-4):", value="1e-4")
     normalize_control = st.checkbox("Нормализация контрольной группы.", value=False)
+    normalize_experimental = st.checkbox("Нормализация опытных групп.", value=False)
 
     if st.button("Запустить анализ"):
         if uploaded_file is None:
@@ -370,14 +389,14 @@ def main():
                     outlier_threshold=outlier_threshold,
                     groups_text=groups_text,
                     risk_input=user_risk_val,
-                    normalize_control=normalize_control
+                    normalize_control=normalize_control,
+                    normalize_experimental=normalize_experimental
                 )
 
             if err_msg:
                 st.error(f"Ошибка: {err_msg}")
             else:
                 st.subheader("Результаты")
-
                 st.write("### Adjusted Logistic Risk Model")
                 st.pyplot(result["fig_log"])
                 st.text(result["text_log"])
