@@ -54,7 +54,7 @@ def format_sci_custom(num, precision=1):
         return f"{base}×10{exp_str}"
 
 ###############################################################################
-# Модели и вспомогательные функции для подгонки
+# Модели и функции подгонки
 ###############################################################################
 
 def model_linear(d, a, b):
@@ -288,6 +288,9 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     try:
         doses_risk = np.array(sorted(risk_df.index))
         risk_vals_emp = np.array([risk_df.loc[d] for d in doses_risk])
+        # Выводим значения, на которых строится логистическая модель риска
+        st.write("Doses used for risk model:", doses_risk)
+        st.write("Empirical risk values:", risk_vals_emp)
         popt_log, _ = curve_fit(risk_logistic_adj, doses_risk, risk_vals_emp, p0=[50, 0.1], maxfev=20000)
         fig_log, ax3 = plt.subplots()
         d_grid_log = np.linspace(doses_risk.min(), doses_risk.max() * 1.2, 150)
