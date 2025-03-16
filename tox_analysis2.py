@@ -54,13 +54,23 @@ def format_sci_custom(num, precision=1):
         return f"{base}×10{exp_str}"
 
 ###############################################################################
-# Определение стандартной логистической функции
+# Стандартная логистическая функция и обратное преобразование
 ###############################################################################
+
 def logistic(x, L, x0, k):
     return L / (1 + np.exp(-k * (x - x0)))
 
+def find_dose_for_logistic(r, x0, k):
+    """
+    Для стандартной логистической функции (L=1):
+    x = x0 - (1/k)*ln(1/r - 1)
+    """
+    if r <= 0 or r >= 1:
+        return np.nan
+    return x0 - (1.0/k) * np.log(1.0/r - 1)
+
 ###############################################################################
-# Модели и функции подгонки для PC1
+# Модели для PC1 и вспомогательные функции подгонки
 ###############################################################################
 
 def model_linear(d, a, b):
@@ -190,7 +200,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                 replacements += 1
                 group_current = df[df["Dose"] == current_dose]
                 mean_current = group_current["PC1"].mean()
-        # Шаг 9.2: корректировка по объединённой выборке (однократно для каждой группы)
+        # Шаг 9.2: корректировка по объединённой выборке из предыдущей и следующей групп
         for i in range(1, len(positive_doses)-1):
             current_dose = positive_doses[i]
             group_current = df[df["Dose"] == current_dose]
@@ -233,9 +243,8 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     if 0 in risk_df.index:
         risk_df.loc[0] = 0.0
 
-    # Корректировка риска по правилу:
-    # Если риск группы, отличной от 0, равен 0, установить его равным 0.1;
-    # Если следующая группа имеет риск 1, то для группы, следующей за 0, установить риск 0.75.
+    # Новое правило для риска:
+    # Устанавливаем риск для первой ненулевой группы равным 0.1, для второй равным 0.75, остальные 1.
     sorted_doses = sorted(risk_df.index)
     if len(sorted_doses) > 1:
         risk_df.loc[sorted_doses[1]] = 0.1
@@ -252,12 +261,12 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     ax2.set_ylabel("Risk (%)")
     ax2.set_title("Empirical Risk")
 
-    # Построение логистической модели риска (с использованием стандартной логистической функции)
     try:
         doses_risk = np.array(sorted(risk_df.index))
         risk_vals_emp = np.array([risk_df.loc[d] for d in doses_risk])
-        # Подгоняем параметры: L=1, x0 = медиана доз, k = 0.01
-        popt_log, _ = curve_fit(logistic, doses_risk, risk_vals_emp, p0=[1, np.median(doses_risk), 0.01], maxfev=20000)
+        popt_log, _ = curve_fit(logistic, doses_risk, risk_vals_emp,
+                                p0=[1, np.median(doses_risk), 0.01],
+                                maxfev=20000)
         fig_log, ax3 = plt.subplots()
         d_grid_log = np.linspace(doses_risk.min(), doses_risk.max() * 1.2, 150)
         risk_log_pred = logistic(d_grid_log, *popt_log)
@@ -310,10 +319,10 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     if popt_log is not None:
         L_est, x0_est, k_est = popt_log
         text_log += f"Параметры логистической модели: L={L_est:.5f}, x0={x0_est:.5f}, k={k_est:.5f}\n"
-        user_risk_dose = find_dose_for_risk_adj(risk_input, x0_est, k_est)  # Для обратного расчёта можно адаптировать
+        user_risk_dose = find_dose_for_logistic(risk_input, x0_est, k_est)
         text_log += f"\nВведённый риск: {risk_input:.5f} => Dose (рассчитанный)={user_risk_dose:.5f}\n\n"
         for rr in [1e-3, 1e-4, 1e-5]:
-            dd_ = find_dose_for_risk_adj(rr, x0_est, k_est)
+            dd_ = find_dose_for_logistic(rr, x0_est, k_est)
             r_str = format_sci_custom(rr, precision=1)
             text_log += f"Risk={r_str} => Dose={dd_:.5f} mg/kg/day\n"
     else:
