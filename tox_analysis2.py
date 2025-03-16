@@ -61,16 +61,12 @@ def logistic(x, L, x0, k):
     return L / (1 + np.exp(-k * (x - x0)))
 
 def find_dose_for_logistic(r, x0, k):
-    """
-    Для стандартной логистической функции (L=1):
-    x = x0 - (1/k)*ln(1/r - 1)
-    """
     if r <= 0 or r >= 1:
         return np.nan
     return x0 - (1.0/k) * np.log(1.0/r - 1)
 
 ###############################################################################
-# Модели для PC1 и вспомогательные функции подгонки
+# Модели для PC1 и функции подгонки
 ###############################################################################
 
 def model_linear(d, a, b):
@@ -200,7 +196,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                 replacements += 1
                 group_current = df[df["Dose"] == current_dose]
                 mean_current = group_current["PC1"].mean()
-        # Шаг 9.2: корректировка по объединённой выборке из предыдущей и следующей групп
+        # Шаг 9.2: корректировка по объединённой выборке (однократно для каждой группы)
         for i in range(1, len(positive_doses)-1):
             current_dose = positive_doses[i]
             group_current = df[df["Dose"] == current_dose]
@@ -228,7 +224,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                                      threshold=outlier_threshold,
                                      groups_to_clean=groups_to_clean)
 
-    # Вычисляем эмпирический риск: выбросы определяются как значения вне интервала [mu-2*sd, mu+2*sd] для контрольной группы
+    # Вычисляем эмпирический риск по выбросам относительно контрольной группы
     df_control = df[df["Dose"] == 0]
     if len(df_control) == 0:
         mu_c = df["PC1"].mean()
@@ -245,15 +241,15 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
 
     # Новое правило для риска:
     # Устанавливаем риск для первой ненулевой группы равным 0.1, для второй равным 0.75, остальные 1.
-    sorted_doses = sorted(risk_df.index)
-    if len(sorted_doses) > 1:
-        risk_df.loc[sorted_doses[1]] = 0.1
-    if len(sorted_doses) > 2:
-        risk_df.loc[sorted_doses[2]] = 0.75
-    for d in sorted_doses[3:]:
-        risk_df.loc[d] = 1.0
+    # sorted_doses = sorted(risk_df.index)
+    # if len(sorted_doses) > 1:
+    #     risk_df.loc[sorted_doses[1]] = 0.1
+    # if len(sorted_doses) > 2:
+    #     risk_df.loc[sorted_doses[2]] = 0.75
+    # for d in sorted_doses[3:]:
+    #     risk_df.loc[d] = 1.0
 
-    st.write("Updated risk values for logistic model:", risk_df)
+    # Убираем вывод таблицы с рисками (строка st.write удалена)
 
     fig_emp, ax2 = plt.subplots()
     ax2.plot(risk_df.index, risk_df.values * 100, 'ro-')
