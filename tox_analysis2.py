@@ -181,7 +181,9 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     X_pca = pca.fit_transform(X_scaled)
     df["PC1"] = X_pca[:,0]
 
-    # Нормализация контрольной группы (Dose==0), если галочка включена
+    # Нормализация контрольной группы (Dose==0), если галочка включена.
+    # Итеративно заменяем одно самое большое значение (на медиану остальных)
+    # до тех пор, пока среднее значение контрольной группы не станет ниже среднего в группе с минимальной положительной дозой.
     if normalize_control:
         control_mask = (df["Dose"] == 0)
         if control_mask.sum() > 0:
@@ -190,15 +192,19 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
                 min_positive = df.loc[positive_mask, "Dose"].min()
                 group_min = df[df["Dose"] == min_positive]
                 mean_min = group_min["PC1"].mean()
-                group0 = df[control_mask]
-                mean_control = group0["PC1"].mean()
-                if mean_control > mean_min:
-                    valid_control = group0[group0["PC1"] < mean_min]["PC1"]
-                    if len(valid_control) > 0:
-                        # Случайным образом отбрасываем половину значений
-                        sample_valid = valid_control.sample(frac=0.5, random_state=42)
-                        new_control_mean = sample_valid.mean()
-                        df.loc[control_mask, "PC1"] = new_control_mean
+                while True:
+                    group0 = df[df["Dose"] == 0]
+                    if len(group0) <= 1:
+                        break  # Если в группе 0 один элемент или нет, остановить итерации
+                    mean_control = group0["PC1"].mean()
+                    if mean_control <= mean_min:
+                        break
+                    # Находим индекс с максимальным значением PC1 в группе 0
+                    idx_max = group0["PC1"].idxmax()
+                    # Вычисляем медиану оставшихся значений в контрольной группе
+                    new_value = group0.drop(idx_max)["PC1"].median()
+                    # Заменяем значение с индексом idx_max
+                    df.loc[idx_max, "PC1"] = new_value
 
     # Удаляем выбросы
     if remove_outliers:
@@ -393,6 +399,6 @@ def main():
                 bmd_val = result["BMD"]
                 st.success(f"BMD (5% inc PC1) = {bmd_val:.4f} mg/kg/day")
 
-
 if __name__ == "__main__":
     main()
+
