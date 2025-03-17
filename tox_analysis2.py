@@ -60,16 +60,11 @@ def format_sci_custom(num, precision=1):
 def logistic(x, L, x0, k):
     return L / (1 + np.exp(-k * (x - x0)))
 
-# def find_dose_for_logistic(r, x0, k):
-#     if r <= 0 or r >= 1:
-#         return np.nan
-#     return x0 - (1.0/k) * np.log(1.0/r - 1)
-
+# Обновлённая функция обратного расчёта дозы для логистической модели с учётом параметра L
 def find_dose_for_logistic(r, L, x0, k):
     if r <= 0 or r >= L:
         return np.nan
     return x0 - (1.0/k) * np.log((L - r) / r)
-
 
 ###############################################################################
 # Модели для PC1 и функции подгонки
@@ -130,6 +125,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     old_cols = df.columns.tolist()
     new_cols = [transliterate_column_name(col) for col in old_cols]
     df.columns = new_cols
+
     dose_col = None
     for c in df.columns:
         if c.lower() in ["doza", "dose", "доза", "доза_"] or c.upper() == "DOZA":
@@ -255,8 +251,6 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     for d in sorted_doses[3:]:
         risk_df.loc[d] = 1.0
 
-    # Убираем вывод таблицы с рисками (строка st.write удалена)
-
     fig_emp, ax2 = plt.subplots()
     ax2.plot(risk_df.index, risk_df.values * 100, 'ro-')
     ax2.set_xlabel("Dose")
@@ -321,10 +315,10 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     if popt_log is not None:
         L_est, x0_est, k_est = popt_log
         text_log += f"Параметры логистической модели: L={L_est:.5f}, x0={x0_est:.5f}, k={k_est:.5f}\n"
-        user_risk_dose = find_dose_for_logistic(risk_input, x0_est, k_est)
+        user_risk_dose = find_dose_for_logistic(risk_input, L_est, x0_est, k_est)
         text_log += f"\nВведённый риск: {risk_input:.5f} => Dose (рассчитанный)={user_risk_dose:.5f}\n\n"
-        for rr in [1e-5, 1e-4, 1e-3]:
-            dd_ = find_dose_for_logistic(rr, x0_est, k_est)
+        for rr in [1e-3, 1e-4, 1e-5]:
+            dd_ = find_dose_for_logistic(rr, L_est, x0_est, k_est)
             r_str = format_sci_custom(rr, precision=1)
             text_log += f"Risk={r_str} => Dose={dd_:.5f} mg/kg/day\n"
     else:
