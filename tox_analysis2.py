@@ -317,7 +317,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
         text_log += f"Параметры логистической модели: L={L_est:.5f}, x0={x0_est:.5f}, k={k_est:.5f}\n"
         user_risk_dose = find_dose_for_logistic(risk_input, x0_est, k_est)
         text_log += f"\nВведённый риск: {risk_input:.5f} => Dose (рассчитанный)={user_risk_dose:.5f}\n\n"
-        for rr in [1e-3, 1e-4, 1e-5]:
+        for rr in [1e-5, 1e-4, 1e-3]:
             dd_ = find_dose_for_logistic(rr, x0_est, k_est)
             r_str = format_sci_custom(rr, precision=1)
             text_log += f"Risk={r_str} => Dose={dd_:.5f} mg/kg/day\n"
