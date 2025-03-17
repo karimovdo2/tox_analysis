@@ -60,10 +60,16 @@ def format_sci_custom(num, precision=1):
 def logistic(x, L, x0, k):
     return L / (1 + np.exp(-k * (x - x0)))
 
-def find_dose_for_logistic(r, x0, k):
-    if r <= 0 or r >= 1:
+# def find_dose_for_logistic(r, x0, k):
+#     if r <= 0 or r >= 1:
+#         return np.nan
+#     return x0 - (1.0/k) * np.log(1.0/r - 1)
+
+def find_dose_for_logistic(r, L, x0, k):
+    if r <= 0 or r >= L:
         return np.nan
-    return x0 - (1.0/k) * np.log(1.0/r - 1)
+    return x0 - (1.0/k) * np.log((L - r) / r)
+
 
 ###############################################################################
 # Модели для PC1 и функции подгонки
