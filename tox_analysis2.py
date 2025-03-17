@@ -245,7 +245,7 @@ def run_analysis(file, remove_outliers, outlier_threshold, groups_text, risk_inp
     # Устанавливаем риск для первой ненулевой группы равным 0.1, для второй равным 0.75, остальные 1.
     sorted_doses = sorted(risk_df.index)
     if len(sorted_doses) > 1:
-        risk_df.loc[sorted_doses[1]] = 0.2
+        risk_df.loc[sorted_doses[1]] = 0.01
     if len(sorted_doses) > 2:
         risk_df.loc[sorted_doses[2]] = 0.75
     for d in sorted_doses[3:]:
