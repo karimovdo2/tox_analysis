@@ -392,7 +392,7 @@ def run_analysis_normexp(file, remove_outliers, outlier_threshold, groups_text, 
     # "Новое правило" - первая ненулевая группа=0.00, вторая=0.75, etc.
     sorted_doses = sorted(risk_df.index)
     if len(sorted_doses) > 1:
-        risk_df.loc[sorted_doses[1]] = 0.00
+        risk_df.loc[sorted_doses[1]] = 0.01
     if len(sorted_doses) > 2:
         risk_df.loc[sorted_doses[2]] = 0.75
     for d in sorted_doses[3:]:
